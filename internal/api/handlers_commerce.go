@@ -31,7 +31,7 @@ type checkoutRequest struct {
 
 func (s *Server) handleCheckout(w http.ResponseWriter, r *http.Request) {
 	sess := SessionOf(r.Context())
-	if d := s.limiter.Allow(sess.User.PublicID, ratelimit.RuleCheckoutPerUser); !d.Allowed {
+	if d := s.limiter.Allow(sess.User.PublicID, s.rules.checkout); !d.Allowed {
 		httpx.Fail(w, r, problem.RateLimited(int(d.RetryAfter.Seconds())+1))
 		return
 	}

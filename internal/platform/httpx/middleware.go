@@ -188,6 +188,10 @@ func Logging(log *slog.Logger, m *metrics.App) Middleware {
 	}
 }
 
+func hasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
 func statusClass(code int) string {
 	switch {
 	case code < 200:
@@ -377,9 +381,22 @@ func ClientIP(ctx context.Context) string {
 }
 
 // RateLimit applies a local GCRA limit keyed by client IP.
-func RateLimit(l *ratelimit.Local, rule ratelimit.Rule, m *metrics.App) Middleware {
+//
+// exempt names paths that must answer even under load: health and readiness
+// probes, metrics, and the correctness-verification endpoints. Throttling a
+// monitor during an incident removes the one signal an operator has, and all of
+// these are separately protected by a token or are read-only and trivial.
+func RateLimit(l *ratelimit.Local, rule ratelimit.Rule, m *metrics.App, exempt ...string) Middleware {
+	skip := make(map[string]bool, len(exempt))
+	for _, p := range exempt {
+		skip[p] = true
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skip[r.URL.Path] || hasPrefix(r.URL.Path, "/internal/verify/") {
+				next.ServeHTTP(w, r)
+				return
+			}
 			key := ClientIP(r.Context())
 			d := l.Allow(key, rule)
 			h := w.Header()

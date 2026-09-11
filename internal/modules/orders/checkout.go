@@ -321,7 +321,7 @@ func (s *Service) readCatalogue(ctx context.Context, tx db.Tx, items []CheckoutI
 		var providerAccount *string
 		var gstin, pan *string
 		var stateCode *int
-		var fyGross *int64
+		var fyGross int64
 		var priceMinor int64
 		var productStatus string
 		var variantActive bool
@@ -337,8 +337,7 @@ func (s *Service) readCatalogue(ctx context.Context, tx db.Tx, items []CheckoutI
 			       s.settlement_hold_days,
 			       v.max_sales, v.sales_count,
 			       COALESCE(fs.commission_bps, 900),
-			       (SELECT t.gross_supply FROM seller_turnover t
-			         WHERE t.seller_id = s.id AND t.fy_start = $3 AND t.currency = v.currency)
+			       seller_fy_gross(s.id, $3::date, v.currency)
 			  FROM products p
 			  JOIN product_variants v ON v.product_id = p.id
 			  JOIN sellers s ON s.id = p.seller_id
@@ -406,9 +405,7 @@ func (s *Service) readCatalogue(ctx context.Context, tx db.Tx, items []CheckoutI
 		if stateCode != nil {
 			cl.stateCode = *stateCode
 		}
-		if fyGross != nil {
-			cl.fyGross = *fyGross
-		}
+		cl.fyGross = fyGross
 		if providerAccount != nil {
 			cl.providerAccount = *providerAccount
 		}
@@ -423,12 +420,16 @@ func (s *Service) readCatalogue(ctx context.Context, tx db.Tx, items []CheckoutI
 	return out, nil
 }
 
-// nextOrderNumber allocates a gapless, per-financial-year order number under a
-// row lock, so concurrent checkouts cannot collide or leave holes.
+// nextOrderNumber allocates a human reference from a sequence.
+//
+// It deliberately does NOT use the gapless invoice allocator: an order number
+// is a reference, not a statutory document, and serialising every checkout
+// behind one counter row was measurably the largest source of contention on
+// the checkout path. Tax invoice numbers, which must be gapless under GST,
+// still use next_invoice_number.
 func (s *Service) nextOrderNumber(ctx context.Context, tx db.Tx, now time.Time) (string, error) {
 	var number string
-	if err := tx.QueryRow(ctx,
-		`SELECT next_invoice_number('seller_supply', $1::date, 'ORD')`, fyStart(now)).Scan(&number); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT next_order_number($1::date)`, fyStart(now)).Scan(&number); err != nil {
 		return "", fmt.Errorf("orders: allocate order number: %w", err)
 	}
 	return number, nil

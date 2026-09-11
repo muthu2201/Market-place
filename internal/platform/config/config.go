@@ -42,6 +42,7 @@ type Config struct {
 	Payments PaymentsConfig
 	Tax      TaxConfig
 	Mail     MailConfig
+	Limits   LimitsConfig
 	Worker   WorkerConfig
 	Platform PlatformConfig
 	Observe  ObserveConfig
@@ -120,6 +121,11 @@ type PaymentsConfig struct {
 	SettlementHoldDays int
 	RollingReserveBps  int64
 	RollingReserveDays int
+	// AllowLoopbackProvider permits a plaintext provider endpoint on a
+	// loopback address, which is how the load harness points the real adapter
+	// at a local protocol simulator. Production refuses it outright: see
+	// validateInvariants.
+	AllowLoopbackProvider bool
 }
 
 type TaxConfig struct {
@@ -144,6 +150,23 @@ type MailConfig struct {
 	SMTPPass    string
 	ResendKey   string
 	Timeout     time.Duration
+}
+
+// LimitsConfig tunes the rate limits without a code change.
+//
+// The defaults are abuse controls, not capacity controls: they are set so a
+// single client cannot monopolise the service, and they sit well below what the
+// application can actually serve. A load test measuring application capacity
+// raises them deliberately and says so in its output.
+type LimitsConfig struct {
+	APIPerIPBurst         int
+	APIPerIPWindow        time.Duration
+	SearchPerIPBurst      int
+	SearchPerIPWindow     time.Duration
+	CheckoutPerUserBurst  int
+	CheckoutPerUserWindow time.Duration
+	LoginPerIPBurst       int
+	LoginPerIPWindow      time.Duration
 }
 
 type WorkerConfig struct {
@@ -259,6 +282,7 @@ func Load() (*Config, error) {
 		SettlementHoldDays:    int(l.int64("SETTLEMENT_HOLD_DAYS", 14)),
 		RollingReserveBps:     l.int64("ROLLING_RESERVE_BPS", 500),
 		RollingReserveDays:    int(l.int64("ROLLING_RESERVE_DAYS", 90)),
+		AllowLoopbackProvider: l.bool("PAYMENTS_ALLOW_LOOPBACK_PROVIDER", false),
 	}
 
 	c.Tax = TaxConfig{
@@ -283,6 +307,17 @@ func Load() (*Config, error) {
 		SMTPPass:    getenv("SMTP_PASSWORD", ""),
 		ResendKey:   getenv("RESEND_API_KEY", ""),
 		Timeout:     l.duration("MAIL_TIMEOUT", 15*time.Second),
+	}
+
+	c.Limits = LimitsConfig{
+		APIPerIPBurst:         int(l.int64("RATE_LIMIT_API_BURST", 300)),
+		APIPerIPWindow:        l.duration("RATE_LIMIT_API_WINDOW", time.Minute),
+		SearchPerIPBurst:      int(l.int64("RATE_LIMIT_SEARCH_BURST", 60)),
+		SearchPerIPWindow:     l.duration("RATE_LIMIT_SEARCH_WINDOW", time.Minute),
+		CheckoutPerUserBurst:  int(l.int64("RATE_LIMIT_CHECKOUT_BURST", 20)),
+		CheckoutPerUserWindow: l.duration("RATE_LIMIT_CHECKOUT_WINDOW", 10*time.Minute),
+		LoginPerIPBurst:       int(l.int64("RATE_LIMIT_LOGIN_BURST", 20)),
+		LoginPerIPWindow:      l.duration("RATE_LIMIT_LOGIN_WINDOW", 15*time.Minute),
 	}
 
 	c.Worker = WorkerConfig{
@@ -344,6 +379,16 @@ func (l *loader) validateInvariants(c *Config) {
 	if c.Database.MinConns > c.Database.MaxConns {
 		l.errf("DB_MIN_CONNS (%d) exceeds DB_MAX_CONNS (%d)", c.Database.MinConns, c.Database.MaxConns)
 	}
+	for name, v := range map[string]int{
+		"RATE_LIMIT_API_BURST":      c.Limits.APIPerIPBurst,
+		"RATE_LIMIT_SEARCH_BURST":   c.Limits.SearchPerIPBurst,
+		"RATE_LIMIT_CHECKOUT_BURST": c.Limits.CheckoutPerUserBurst,
+		"RATE_LIMIT_LOGIN_BURST":    c.Limits.LoginPerIPBurst,
+	} {
+		if v < 1 {
+			l.errf("%s must be at least 1; a limit of zero refuses every request", name)
+		}
+	}
 	if c.Platform.DownloadURLTTL > time.Hour {
 		l.errf("DOWNLOAD_URL_TTL %s is too long; signed delivery URLs must be short-lived", c.Platform.DownloadURLTTL)
 	}
@@ -388,8 +433,14 @@ func (l *loader) validateInvariants(c *Config) {
 	if c.Payments.Provider == "mor" && (c.Payments.MoRAPIKey == "" || c.Payments.MoRWebhookSecret == "") {
 		l.errf("the merchant-of-record adapter requires MOR_API_KEY and MOR_WEBHOOK_SECRET")
 	}
+	if c.Payments.AllowLoopbackProvider {
+		l.errf("PAYMENTS_ALLOW_LOOPBACK_PROVIDER cannot be enabled in production: it permits an unencrypted payment endpoint")
+	}
 	if c.Payments.SettlementHoldDays < 7 {
 		l.errf("SETTLEMENT_HOLD_DAYS must be at least 7: RuPay representment alone runs to 7 working days")
+	}
+	if c.Limits.LoginPerIPBurst > 200 {
+		l.errf("RATE_LIMIT_LOGIN_BURST of %d is too high for production: password hashing is deliberately expensive and this invites a resource-exhaustion attack", c.Limits.LoginPerIPBurst)
 	}
 	if !c.Security.RequireTwoFactorForSellers {
 		l.errf("REQUIRE_2FA_SELLERS cannot be disabled in production: sellers control payout destinations")

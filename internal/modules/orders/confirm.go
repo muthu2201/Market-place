@@ -520,25 +520,26 @@ func (s *Service) recordTransfers(ctx context.Context, tx db.Tx, o *Order, payme
 	return nil
 }
 
-// updateTurnover advances the running totals that drive the s.194-O threshold,
-// the GST registration relief and Route eligibility.
+// updateTurnover records the movements that drive the s.194-O threshold, the
+// GST registration relief and Route eligibility.
+//
+// Writes are append-only deltas rather than updates to an aggregate row. A
+// single platform-wide counter that every order touches is a guaranteed
+// bottleneck: under load it either serialises every checkout or aborts them,
+// and the load test showed it doing the latter. The worker folds deltas into
+// the aggregates, and readers add the un-rolled tail, which is the same shape
+// that already works for ledger balances.
 func (s *Service) updateTurnover(ctx context.Context, tx db.Tx, o *Order, now time.Time) error {
 	fy := fyStart(now)
 	for _, l := range o.Lines {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO seller_turnover (seller_id, fy_start, currency, gross_supply, taxable_supply,
-			                             tds_deducted, tcs_collected, order_count)
-			VALUES ($1,$2,$3,$4,$4,$5,$6,1)
-			ON CONFLICT (seller_id, fy_start, currency) DO UPDATE
-			   SET gross_supply   = seller_turnover.gross_supply   + EXCLUDED.gross_supply,
-			       taxable_supply = seller_turnover.taxable_supply + EXCLUDED.taxable_supply,
-			       tds_deducted   = seller_turnover.tds_deducted   + EXCLUDED.tds_deducted,
-			       tcs_collected  = seller_turnover.tcs_collected  + EXCLUDED.tcs_collected,
-			       order_count    = seller_turnover.order_count    + 1,
-			       updated_at     = now()`,
+			INSERT INTO turnover_deltas (scope, seller_id, fy_start, currency,
+			                             gross_supply, taxable_supply, tds_deducted,
+			                             tcs_collected, order_count)
+			VALUES ('seller',$1,$2,$3,$4,$4,$5,$6,1)`,
 			l.SellerID, fy, string(o.Currency), l.Breakdown.ListPrice.Minor(),
 			l.Breakdown.TDS.Minor(), l.Breakdown.TCS.Minor()); err != nil {
-			return fmt.Errorf("orders: update seller turnover: %w", err)
+			return fmt.Errorf("orders: record seller turnover: %w", err)
 		}
 	}
 
@@ -552,16 +553,11 @@ func (s *Service) updateTurnover(ctx context.Context, tx db.Tx, o *Order, now ti
 		commission += l.Breakdown.Commission.Minor()
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_turnover (fy_start, currency, domestic_gmv, export_gmv, commission_income, order_count)
-		VALUES ($1,$2,$3,$4,$5,1)
-		ON CONFLICT (fy_start) DO UPDATE
-		   SET domestic_gmv      = platform_turnover.domestic_gmv      + EXCLUDED.domestic_gmv,
-		       export_gmv        = platform_turnover.export_gmv        + EXCLUDED.export_gmv,
-		       commission_income = platform_turnover.commission_income + EXCLUDED.commission_income,
-		       order_count       = platform_turnover.order_count       + 1,
-		       updated_at        = now()`,
+		INSERT INTO turnover_deltas (scope, fy_start, currency, gross_supply, export_supply,
+		                             commission, order_count)
+		VALUES ('platform',$1,$2,$3,$4,$5,1)`,
 		fy, string(o.Currency), domestic, export, commission); err != nil {
-		return fmt.Errorf("orders: update platform turnover: %w", err)
+		return fmt.Errorf("orders: record platform turnover: %w", err)
 	}
 	return nil
 }

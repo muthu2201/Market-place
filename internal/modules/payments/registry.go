@@ -15,25 +15,20 @@ import (
 // redirect settlement.
 func Build(cfg config.PaymentsConfig, m *metrics.App) (Provider, error) {
 	switch cfg.Provider {
-	case "bridge":
+	case "bridge", "razorpay_route":
 		return NewRazorpay(RazorpayConfig{
 			BaseURL: cfg.RazorpayBaseURL, KeyID: cfg.RazorpayKeyID,
 			KeySecret: cfg.RazorpayKeySecret, WebhookSecret: cfg.RazorpayWebhookSecret,
 			Timeout: cfg.RequestTimeout, MaxRetries: cfg.MaxRetries,
-			RouteMode: false, Metrics: m,
-		})
-	case "razorpay_route":
-		return NewRazorpay(RazorpayConfig{
-			BaseURL: cfg.RazorpayBaseURL, KeyID: cfg.RazorpayKeyID,
-			KeySecret: cfg.RazorpayKeySecret, WebhookSecret: cfg.RazorpayWebhookSecret,
-			Timeout: cfg.RequestTimeout, MaxRetries: cfg.MaxRetries,
-			RouteMode: true, Metrics: m,
+			RouteMode: cfg.Provider == "razorpay_route", Metrics: m,
+			AllowPrivateHosts: cfg.AllowLoopbackProvider,
 		})
 	case "mor":
 		return NewMerchantOfRecord(MoRConfig{
 			Vendor: cfg.MoRProvider, BaseURL: cfg.MoRBaseURL, APIKey: cfg.MoRAPIKey,
 			WebhookSecret: cfg.MoRWebhookSecret, Timeout: cfg.RequestTimeout,
 			MaxRetries: cfg.MaxRetries, Metrics: m,
+			AllowPrivateHosts: cfg.AllowLoopbackProvider,
 		})
 	}
 	return nil, fmt.Errorf("payments: unknown provider %q", cfg.Provider)

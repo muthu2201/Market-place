@@ -168,6 +168,19 @@ func (w *Worker) Tasks() []Task {
 			},
 		},
 		{
+			Name: "rollup_turnover", Every: time.Minute, Jitter: 20 * time.Second,
+			Run: func(ctx context.Context) (string, error) {
+				var n int
+				if err := w.app.DB.QueryRow(ctx, `SELECT rollup_turnover()`).Scan(&n); err != nil {
+					return "", fmt.Errorf("worker: rollup turnover: %w", err)
+				}
+				if n == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("rows=%d", n), nil
+			},
+		},
+		{
 			Name: "verify_trial_balance", Every: 5 * time.Minute, Jitter: 45 * time.Second,
 			Run: func(ctx context.Context) (string, error) {
 				// The most important invariant in the system: if this fails,

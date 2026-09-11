@@ -144,9 +144,18 @@ func (d *DB) observe(start time.Time, op string) {
 type TxOptions struct {
 	// Name labels the transaction in metrics and logs.
 	Name string
-	// Isolation defaults to RepeatableRead. Use Serializable for anything that
-	// reads a set of rows and then writes a value derived from that set
-	// (balance checks, exposure caps, quota enforcement).
+	// Isolation defaults to ReadCommitted, which is PostgreSQL's own default.
+	//
+	// The contract that makes it safe is explicit: any read-modify-write must
+	// either hold a row lock (SELECT ... FOR UPDATE) or be expressed as a
+	// single atomic statement (INSERT ... ON CONFLICT DO UPDATE SET x = x + n).
+	// Under ReadCommitted a contended row blocks and is re-read; under
+	// RepeatableRead the same contention aborts the transaction, which a load
+	// test showed turning ordinary concurrency into 500s on the checkout path.
+	//
+	// Use RepeatableRead when a transaction must see one consistent snapshot
+	// across several statements, and Serializable when it reads a SET of rows
+	// and writes a value derived from that set without locking them all.
 	Isolation pgx.TxIsoLevel
 	// ReadOnly lets Postgres skip work and protects against accidental writes
 	// in a reporting path.
@@ -163,7 +172,7 @@ var ErrRollback = errors.New("db: rollback requested")
 // fn MUST be idempotent: it can be executed more than once.
 func (d *DB) InTx(ctx context.Context, o TxOptions, fn func(ctx context.Context, tx Tx) error) error {
 	if o.Isolation == "" {
-		o.Isolation = pgx.RepeatableRead
+		o.Isolation = pgx.ReadCommitted
 	}
 	if o.Name == "" {
 		o.Name = "tx"

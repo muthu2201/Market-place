@@ -206,9 +206,9 @@ func (s *Service) Refund(ctx context.Context, req RefundRequest) (*RefundOutcome
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE seller_turnover SET refunded_amount = refunded_amount + $3, updated_at = now()
-			 WHERE seller_id = $1 AND fy_start = $2`,
-			line.SellerID, fyStart(s.clk.Now()), amount.Minor()); err != nil {
+			INSERT INTO turnover_deltas (scope, seller_id, fy_start, currency, refunded_amount)
+			VALUES ('seller',$1,$2,$3,$4)`,
+			line.SellerID, fyStart(s.clk.Now()), string(o.Currency), amount.Minor()); err != nil {
 			return err
 		}
 

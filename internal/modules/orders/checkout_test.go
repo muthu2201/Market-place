@@ -226,13 +226,42 @@ func TestFullPurchaseJourney(t *testing.T) {
 	}
 
 	// ---- turnover advanced for both thresholds ----------------------------
+	// Turnover is written as an append-only delta and read as "rolled total
+	// plus un-rolled tail", so the assertion goes through the read path the
+	// section 194-O threshold check actually uses.
 	var gross int64
 	if err := h.db.QueryRow(h.ctx,
-		`SELECT gross_supply FROM seller_turnover WHERE seller_id = $1`, seller.ID).Scan(&gross); err != nil {
+		`SELECT seller_fy_gross($1, $2::date, 'INR')`,
+		seller.ID, "2026-04-01").Scan(&gross); err != nil {
 		t.Fatal(err)
 	}
 	if gross != 200000 {
 		t.Fatalf("seller turnover = %d, want 200000 (tax-exclusive value)", gross)
+	}
+	// And it must survive a rollup unchanged: a rollup that double-counts or
+	// drops a delta would silently corrupt a statutory threshold.
+	if _, err := h.db.Exec(h.ctx, `SELECT rollup_turnover()`); err != nil {
+		t.Fatal(err)
+	}
+	var afterRollup int64
+	if err := h.db.QueryRow(h.ctx,
+		`SELECT seller_fy_gross($1, $2::date, 'INR')`, seller.ID, "2026-04-01").Scan(&afterRollup); err != nil {
+		t.Fatal(err)
+	}
+	if afterRollup != gross {
+		t.Fatalf("rollup changed the answer: %d -> %d", gross, afterRollup)
+	}
+	// A second rollup must be a no-op, not a double count.
+	if _, err := h.db.Exec(h.ctx, `SELECT rollup_turnover()`); err != nil {
+		t.Fatal(err)
+	}
+	var twice int64
+	if err := h.db.QueryRow(h.ctx,
+		`SELECT seller_fy_gross($1, $2::date, 'INR')`, seller.ID, "2026-04-01").Scan(&twice); err != nil {
+		t.Fatal(err)
+	}
+	if twice != gross {
+		t.Fatalf("a second rollup double-counted: %d -> %d", gross, twice)
 	}
 
 	// ---- both invoices raised ---------------------------------------------

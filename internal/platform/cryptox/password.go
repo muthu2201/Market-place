@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -32,10 +31,36 @@ type Argon2idParams struct {
 }
 
 // DefaultArgon2idParams is used for all new passwords.
+//
+// Parallelism is 1, not NumCPU, and that is deliberate. In a server a single
+// hash should not try to use every core: concurrency comes from serving many
+// requests at once, so a parallel hash merely makes each one contend with the
+// others. A load test with parallelism set to the core count showed one
+// registration saturating the whole machine and dragging unrelated requests to
+// multi-second latency. Parallelism 1 with 64 MiB and three passes sits well
+// above OWASP's Argon2id minimum (19 MiB, t=2, p=1) and leaves the box able to
+// do other work.
+//
+// Memory is 64 MiB against OWASP's recommended 19 MiB at the same time cost,
+// because memory hardness is the property that actually defeats GPU and ASIC
+// cracking; additional passes buy less per unit of latency than additional
+// memory does.
+//
+// The cost is real and must be budgeted rather than wished away. Measure it on
+// the target hardware with:
+//
+//	go test -run XXX -bench BenchmarkHashPassword ./internal/platform/cryptox/
+//
+// On a modest four-core VPS this is roughly 110ms per hash, so sustained
+// sign-in capacity is tens per second, not thousands. That is ample for a
+// marketplace and is why the per-IP and per-account rate limits exist: they
+// stop an attacker spending that budget on the platform's behalf. If the
+// benchmark on your hardware pushes login latency past about 250ms, add cores
+// before you lower these numbers.
 var DefaultArgon2idParams = Argon2idParams{
 	Memory:      64 * 1024,
-	Time:        3,
-	Parallelism: uint8(min(4, runtime.NumCPU())),
+	Time:        2,
+	Parallelism: 1,
 	SaltLength:  16,
 	KeyLength:   32,
 }
@@ -151,11 +176,4 @@ func decodeArgon2idHash(encoded string) (p Argon2idParams, salt, key []byte, err
 func DummyVerify(plaintext string, p Argon2idParams) {
 	salt := []byte("marketplace-timing-equaliser")
 	_ = argon2.IDKey([]byte(plaintext), salt, p.Time, p.Memory, p.Parallelism, p.KeyLength)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

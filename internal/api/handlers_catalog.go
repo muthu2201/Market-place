@@ -14,7 +14,6 @@ import (
 	"github.com/muthu2201/market-place/internal/platform/ids"
 	"github.com/muthu2201/market-place/internal/platform/money"
 	"github.com/muthu2201/market-place/internal/platform/problem"
-	"github.com/muthu2201/market-place/internal/platform/ratelimit"
 )
 
 // productSummary is the public shape of a listing. Internal columns (object
@@ -115,7 +114,7 @@ func (s *Server) handleGetProduct(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	if d := s.limiter.Allow(httpx.ClientIP(r.Context()), ratelimit.RuleSearchPerIP); !d.Allowed {
+	if d := s.limiter.Allow(httpx.ClientIP(r.Context()), s.rules.search); !d.Allowed {
 		httpx.Fail(w, r, problem.RateLimited(int(d.RetryAfter.Seconds())+1))
 		return
 	}

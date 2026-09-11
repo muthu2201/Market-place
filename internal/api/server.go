@@ -43,8 +43,25 @@ type Server struct {
 	audit    *audit.Service
 
 	limiter   *ratelimit.Local
+	rules     limitRules
 	startedAt time.Time
 	handler   http.Handler
+}
+
+// limitRules holds the configured limits, so a handler reads one place rather
+// than reaching for a package-level default.
+type limitRules struct {
+	api      ratelimit.Rule
+	search   ratelimit.Rule
+	checkout ratelimit.Rule
+}
+
+func rulesFrom(l config.LimitsConfig) limitRules {
+	return limitRules{
+		api:      ratelimit.Rule{Name: "api_ip", Burst: l.APIPerIPBurst, Period: l.APIPerIPWindow},
+		search:   ratelimit.Rule{Name: "search_ip", Burst: l.SearchPerIPBurst, Period: l.SearchPerIPWindow},
+		checkout: ratelimit.Rule{Name: "checkout_user", Burst: l.CheckoutPerUserBurst, Period: l.CheckoutPerUserWindow},
+	}
 }
 
 // Dependencies is everything the HTTP layer needs. Constructing it explicitly,
@@ -83,6 +100,7 @@ func New(d Dependencies) (*Server, error) {
 		ledger: d.Ledger, audit: d.Audit,
 		limiter: ratelimit.NewLocal(d.Clock), startedAt: d.Clock.Now(),
 	}
+	s.rules = rulesFrom(d.Config.Limits)
 	s.handler = s.routes()
 	return s, nil
 }
@@ -148,6 +166,13 @@ func (s *Server) routes() http.Handler {
 	// authentication, and a provider cannot send a CSRF token.
 	s.route(mux, "POST /webhooks/payments", s.handlePaymentWebhook)
 
+	// --- correctness verification ------------------------------------------
+	// Gated by the operations token or a staff session. These run the system's
+	// own audit of itself and are what the load harness asserts against.
+	s.route(mux, "GET /internal/verify/trial-balance", s.requireInternalToken(s.handleVerifyTrialBalance))
+	s.route(mux, "GET /internal/verify/audit-chain", s.requireInternalToken(s.handleVerifyAudit))
+	s.route(mux, "GET /internal/verify/consistency", s.requireInternalToken(s.handleVerifyConsistency))
+
 	// --- operations ---------------------------------------------------------
 	s.staffed(mux, "GET /api/v1/admin/ledger/trial-balance", s.handleTrialBalance, identity.RoleFinanceOperator, identity.RoleAdmin)
 	s.staffed(mux, "GET /api/v1/admin/audit/verify", s.handleVerifyAuditChain, identity.RoleAdmin)
@@ -167,7 +192,8 @@ func (s *Server) routes() http.Handler {
 		httpx.CORS(origins),
 		httpx.MaxBytes(s.cfg.HTTP.MaxRequestBytes),
 		httpx.Timeout(s.cfg.HTTP.WriteTimeout-time.Second),
-		httpx.RateLimit(s.limiter, ratelimit.RuleAPIPerIP, s.m),
+		httpx.RateLimit(s.limiter, s.rules.api, s.m,
+			"/healthz", "/readyz", "/metrics", "/.well-known/security.txt"),
 		s.authenticate,
 		csrf,
 	)
