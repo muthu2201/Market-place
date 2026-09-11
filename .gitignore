@@ -1,0 +1,11 @@
+/bin/
+/dist/
+*.test
+*.out
+.env
+.env.*
+!.env.example
+/tmp/
+/pgdata/
+/var/
+/artifacts/
