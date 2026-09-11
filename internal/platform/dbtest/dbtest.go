@@ -35,12 +35,24 @@ const defaultURL = "postgres://marketplace:dev_local_only_pw@127.0.0.1:5432/mark
 const templateSuffix = "_template"
 
 var (
-	once       sync.Once
-	shared     *db.DB
-	initErr    error
-	registry   = metrics.NewRegistry()
-	appMetrics *metrics.App
+	once         sync.Once
+	shared       *db.DB
+	effectiveDSN string
+	initErr      error
+	registry     = metrics.NewRegistry()
+	appMetrics   *metrics.App
 )
+
+// EffectiveURL returns the DSN of the database private to this test binary.
+//
+// Tests that build the application must pass this, not URL(): pointing the
+// application at the shared base database while the harness truncates the
+// private clone is a state leak that produces failures with no obvious cause.
+func EffectiveURL(t *testing.T) string {
+	t.Helper()
+	Open(t)
+	return effectiveDSN
+}
 
 // URL returns the base test database DSN, honouring TEST_DATABASE_URL.
 func URL() string {
@@ -86,8 +98,9 @@ func Open(t *testing.T) *db.DB {
 
 		private := *base
 		private.Path = "/" + privateName
+		effectiveDSN = private.String()
 		d, err := db.Open(ctx, config.DatabaseConfig{
-			URL: private.String(), MaxConns: 16, MinConns: 1,
+			URL: effectiveDSN, MaxConns: 16, MinConns: 1,
 			MaxConnLifetime: time.Hour, MaxConnIdleTime: 10 * time.Minute,
 			StatementTimeout: 30 * time.Second, ConnectTimeout: 5 * time.Second,
 		}, appMetrics)

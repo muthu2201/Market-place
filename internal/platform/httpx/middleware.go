@@ -202,24 +202,48 @@ func statusClass(code int) string {
 	return "5xx"
 }
 
-// Route records the route template for metrics and logs. Handlers call it (or
-// the router does) so that cardinality stays bounded by the number of routes
-// rather than by the number of distinct URLs an attacker can invent.
-func Route(ctx context.Context, template string) context.Context {
-	return context.WithValue(ctx, ctxKeyRoute, template)
+// routeHolder is a mutable cell placed in the context by the OUTER middleware
+// and filled in by the router once a pattern matches.
+//
+// A plain context value cannot work here: the router runs inside the logging
+// middleware, and a context created deeper in the stack is invisible to the
+// layer above it. Without the cell, every metric would be labelled "unmatched",
+// which is exactly the bug the end-to-end suite caught.
+type routeHolder struct{ template string }
+
+// WithRouteCapture installs the cell. It must sit outside anything that reads
+// the route, which in practice means outside the logging middleware.
+func WithRouteCapture() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			holder := &routeHolder{}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRoute, holder)))
+		})
+	}
 }
 
+// Route records the route template for metrics and logs, so cardinality stays
+// bounded by the number of routes rather than by the number of distinct URLs an
+// attacker can invent.
+func Route(ctx context.Context, template string) {
+	if h, ok := ctx.Value(ctxKeyRoute).(*routeHolder); ok {
+		h.template = template
+	}
+}
+
+// RouteOf returns the matched route template, or "" before a match.
 func RouteOf(ctx context.Context) string {
-	if s, ok := ctx.Value(ctxKeyRoute).(string); ok {
-		return s
+	if h, ok := ctx.Value(ctxKeyRoute).(*routeHolder); ok {
+		return h.template
 	}
 	return ""
 }
 
-// WithRoute wraps a handler so that its template is attached before it runs.
+// WithRoute wraps a handler so its template is recorded before it runs.
 func WithRoute(template string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.ServeHTTP(w, r.WithContext(Route(r.Context(), template)))
+		Route(r.Context(), template)
+		h.ServeHTTP(w, r)
 	})
 }
 
