@@ -68,8 +68,9 @@ func (s *Service) BeginPasswordReset(ctx context.Context, email, ip string) (Iss
 		// Any outstanding reset is consumed: issuing a second link must not
 		// leave the first one live.
 		if _, err := tx.Exec(ctx, `
-			UPDATE credential_tokens SET consumed_at = now()
-			 WHERE user_id = $1 AND purpose = 'password_reset' AND consumed_at IS NULL`, userID); err != nil {
+			UPDATE credential_tokens SET consumed_at = $2
+			 WHERE user_id = $1 AND purpose = 'password_reset' AND consumed_at IS NULL`,
+			userID, s.clk.Now()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -112,14 +113,17 @@ func (s *Service) CompletePasswordReset(ctx context.Context, token, newPassword,
 	return s.db.InTx(ctx, db.TxOptions{Name: "password_reset_complete"}, func(ctx context.Context, tx db.Tx) error {
 		var userID ids.UUID
 		var emailCT, nameCT []byte
+		// Expiry is compared against the application's clock, not the
+		// database's. Two clocks means two answers to "has this expired", and
+		// the application's is the one every other deadline in the system uses.
 		err := tx.QueryRow(ctx, `
 			SELECT t.user_id, u.email_ciphertext, u.display_name_ciphertext
 			  FROM credential_tokens t
 			  JOIN users u ON u.id = t.user_id
 			 WHERE t.token_hash = $1 AND t.purpose = 'password_reset'
-			   AND t.consumed_at IS NULL AND t.expires_at > now()
+			   AND t.consumed_at IS NULL AND t.expires_at > $2
 			   AND u.erased_at IS NULL
-			 FOR UPDATE OF t`, cryptox.HashToken(token)).Scan(&userID, &emailCT, &nameCT)
+			 FOR UPDATE OF t`, cryptox.HashToken(token), s.clk.Now()).Scan(&userID, &emailCT, &nameCT)
 		if db.IsNoRows(err) {
 			return problem.Unauthenticated("That reset link is invalid or has expired. Request a new one.")
 		}
@@ -138,8 +142,8 @@ func (s *Service) CompletePasswordReset(ctx context.Context, token, newPassword,
 		}
 
 		if _, err := tx.Exec(ctx,
-			`UPDATE credential_tokens SET consumed_at = now() WHERE token_hash = $1`,
-			cryptox.HashToken(token)); err != nil {
+			`UPDATE credential_tokens SET consumed_at = $2 WHERE token_hash = $1`,
+			cryptox.HashToken(token), s.clk.Now()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -237,10 +241,10 @@ func (s *Service) CompleteEmailVerification(ctx context.Context, token string) (
 	var userID ids.UUID
 	err := s.db.InTx(ctx, db.TxOptions{Name: "email_verify"}, func(ctx context.Context, tx db.Tx) error {
 		err := tx.QueryRow(ctx, `
-			UPDATE credential_tokens SET consumed_at = now()
+			UPDATE credential_tokens SET consumed_at = $2
 			 WHERE token_hash = $1 AND purpose = 'email_verification'
-			   AND consumed_at IS NULL AND expires_at > now()
-			 RETURNING user_id`, cryptox.HashToken(token)).Scan(&userID)
+			   AND consumed_at IS NULL AND expires_at > $2
+			 RETURNING user_id`, cryptox.HashToken(token), s.clk.Now()).Scan(&userID)
 		if db.IsNoRows(err) {
 			return problem.Unauthenticated("That verification link is invalid or has expired.")
 		}
@@ -248,7 +252,8 @@ func (s *Service) CompleteEmailVerification(ctx context.Context, token string) (
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1`, userID); err != nil {
+			`UPDATE users SET email_verified_at = COALESCE(email_verified_at, $2) WHERE id = $1`,
+			userID, s.clk.Now()); err != nil {
 			return err
 		}
 		return s.audit.Record(ctx, tx, audit.Event{
@@ -301,7 +306,8 @@ func (s *Service) EraseSubject(ctx context.Context, userID ids.UUID, reason stri
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE credential_tokens SET consumed_at = now() WHERE user_id = $1 AND consumed_at IS NULL`, userID); err != nil {
+			`UPDATE credential_tokens SET consumed_at = $2 WHERE user_id = $1 AND consumed_at IS NULL`,
+			userID, s.clk.Now()); err != nil {
 			return err
 		}
 		return s.audit.Record(ctx, tx, audit.Event{

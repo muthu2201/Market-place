@@ -646,8 +646,8 @@ func (s *Service) RevokeAllSessions(ctx context.Context, q db.Querier, userID id
 func (s *Service) rolesOf(ctx context.Context, q db.Querier, userID ids.UUID) ([]string, error) {
 	rows, err := q.Query(ctx, `
 		SELECT role_code FROM user_roles
-		 WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now())
-		 ORDER BY role_code`, userID)
+		 WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > $2)
+		 ORDER BY role_code`, userID, s.clk.Now())
 	if err != nil {
 		return nil, fmt.Errorf("identity: read roles: %w", err)
 	}

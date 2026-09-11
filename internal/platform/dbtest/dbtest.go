@@ -7,12 +7,19 @@ package dbtest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/muthu2201/market-place/internal/platform/config"
 	"github.com/muthu2201/market-place/internal/platform/db"
@@ -22,6 +29,11 @@ import (
 
 const defaultURL = "postgres://marketplace:dev_local_only_pw@127.0.0.1:5432/marketplace_test?sslmode=disable"
 
+// templateSuffix names the database that is migrated once and then cloned.
+// Cloning a template is a file copy inside PostgreSQL, so each test binary gets
+// a private, fully-migrated database in milliseconds.
+const templateSuffix = "_template"
+
 var (
 	once       sync.Once
 	shared     *db.DB
@@ -30,7 +42,7 @@ var (
 	appMetrics *metrics.App
 )
 
-// URL returns the test database DSN, honouring TEST_DATABASE_URL.
+// URL returns the base test database DSN, honouring TEST_DATABASE_URL.
 func URL() string {
 	if v := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL")); v != "" {
 		return v
@@ -38,32 +50,49 @@ func URL() string {
 	return defaultURL
 }
 
-// Open returns a process-wide pool against a freshly migrated test database.
-// It skips the test when no database is reachable, so `go test ./...` still
-// works on a machine without PostgreSQL while CI runs the full suite.
+// Open returns a pool against a database private to THIS test binary.
+//
+// Sharing one database across packages is what made `go test ./...` deadlock:
+// package A's TRUNCATE collided with package B's in-flight work. Each binary
+// now clones a pre-migrated template instead, so packages are isolated and the
+// suite runs in parallel at full speed.
+//
+// It skips rather than fails when no database is reachable, so `go test ./...`
+// still works on a machine without PostgreSQL while CI runs the full suite.
 func Open(t *testing.T) *db.DB {
 	t.Helper()
 	once.Do(func() {
 		appMetrics = metrics.NewApp(registry)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 
+		base, err := url.Parse(URL())
+		if err != nil {
+			initErr = err
+			return
+		}
+		baseName := strings.TrimPrefix(base.Path, "/")
+		templateName := baseName + templateSuffix
+		privateName := baseName + "_" + binaryTag()
+
+		if err := ensureTemplate(ctx, base, templateName); err != nil {
+			initErr = err
+			return
+		}
+		if err := cloneDatabase(ctx, base, templateName, privateName); err != nil {
+			initErr = err
+			return
+		}
+
+		private := *base
+		private.Path = "/" + privateName
 		d, err := db.Open(ctx, config.DatabaseConfig{
-			URL: URL(), MaxConns: 16, MinConns: 1,
+			URL: private.String(), MaxConns: 16, MinConns: 1,
 			MaxConnLifetime: time.Hour, MaxConnIdleTime: 10 * time.Minute,
 			StatementTimeout: 30 * time.Second, ConnectTimeout: 5 * time.Second,
 		}, appMetrics)
 		if err != nil {
 			initErr = err
-			return
-		}
-		migrations, err := migrate.Embedded()
-		if err != nil {
-			initErr = err
-			return
-		}
-		if _, err := migrate.Up(ctx, d.Pool(), migrations); err != nil {
-			initErr = fmt.Errorf("migrate test database: %w", err)
 			return
 		}
 		shared = d
@@ -72,6 +101,115 @@ func Open(t *testing.T) *db.DB {
 		t.Skipf("integration test skipped: no test database available (%v)", initErr)
 	}
 	return shared
+}
+
+// binaryTag derives a stable, filesystem-safe name from the test binary, so a
+// package always lands on the same database and leftovers do not accumulate.
+func binaryTag() string {
+	name := filepath.Base(os.Args[0])
+	name = strings.TrimSuffix(name, ".test")
+	sum := sha256.Sum256([]byte(os.Args[0]))
+	safe := make([]byte, 0, len(name))
+	for i := 0; i < len(name) && i < 24; i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			safe = append(safe, c)
+		} else if c >= 'A' && c <= 'Z' {
+			safe = append(safe, c+32)
+		} else {
+			safe = append(safe, '_')
+		}
+	}
+	return string(safe) + "_" + hex.EncodeToString(sum[:4])
+}
+
+// maintenanceConn opens a connection to the "postgres" database, which is where
+// CREATE DATABASE and DROP DATABASE must be issued from.
+func maintenanceConn(ctx context.Context, base *url.URL) (*pgx.Conn, error) {
+	admin := *base
+	admin.Path = "/postgres"
+	return pgx.Connect(ctx, admin.String())
+}
+
+// ensureTemplate migrates the template database once, under an advisory lock so
+// several test binaries starting together do not race.
+func ensureTemplate(ctx context.Context, base *url.URL, templateName string) error {
+	admin, err := maintenanceConn(ctx, base)
+	if err != nil {
+		return fmt.Errorf("connect to maintenance database: %w", err)
+	}
+	defer admin.Close(context.WithoutCancel(ctx))
+
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock($1)`, int64(0x7E5700000001)); err != nil {
+		return fmt.Errorf("template lock: %w", err)
+	}
+	defer func() {
+		_, _ = admin.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(0x7E5700000001))
+	}()
+
+	var exists bool
+	if err := admin.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, templateName).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := admin.Exec(ctx, `CREATE DATABASE "`+templateName+`"`); err != nil {
+			return fmt.Errorf("create template: %w", err)
+		}
+	}
+
+	tmpl := *base
+	tmpl.Path = "/" + templateName
+	pool, err := pgxpool.New(ctx, tmpl.String())
+	if err != nil {
+		return fmt.Errorf("connect template: %w", err)
+	}
+	defer pool.Close()
+
+	for _, ext := range []string{"pg_trgm", "pgcrypto", "btree_gist"} {
+		if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS `+ext); err != nil {
+			return fmt.Errorf("create extension %s: %w", ext, err)
+		}
+	}
+	migrations, err := migrate.Embedded()
+	if err != nil {
+		return err
+	}
+	if _, err := migrate.Up(ctx, pool, migrations); err != nil {
+		return fmt.Errorf("migrate template: %w", err)
+	}
+	return nil
+}
+
+// cloneDatabase drops any previous copy and clones the template.
+func cloneDatabase(ctx context.Context, base *url.URL, templateName, target string) error {
+	admin, err := maintenanceConn(ctx, base)
+	if err != nil {
+		return err
+	}
+	defer admin.Close(context.WithoutCancel(ctx))
+
+	// Any connection to the template blocks CREATE DATABASE ... TEMPLATE, and
+	// any connection to the target blocks the drop.
+	for _, name := range []string{target} {
+		if _, err := admin.Exec(ctx, `
+			SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+			 WHERE datname = $1 AND pid <> pg_backend_pid()`, name); err != nil {
+			return fmt.Errorf("evict connections to %s: %w", name, err)
+		}
+	}
+	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS "`+target+`"`); err != nil {
+		return fmt.Errorf("drop %s: %w", target, err)
+	}
+	if _, err := admin.Exec(ctx, `
+		SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		 WHERE datname = $1 AND pid <> pg_backend_pid()`, templateName); err != nil {
+		return fmt.Errorf("evict connections to the template: %w", err)
+	}
+	if _, err := admin.Exec(ctx, `CREATE DATABASE "`+target+`" TEMPLATE "`+templateName+`"`); err != nil {
+		return fmt.Errorf("clone template into %s: %w", target, err)
+	}
+	return nil
 }
 
 // Metrics exposes the registry the test pool reports into.

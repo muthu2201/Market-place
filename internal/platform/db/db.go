@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -364,15 +365,27 @@ func sanitiseIdent(s string) string {
 	return strings.ToLower(s)
 }
 
-var jitterSeed uint64 = 0x2545F4914F6CDD1D
+// jitterCounter drives full-jitter backoff. It is atomic because InTx is called
+// from every request goroutine: an unsynchronised package variable here is a
+// genuine data race, which the race detector found on first run.
+var jitterCounter atomic.Uint64
 
+func init() { jitterCounter.Store(0x2545F4914F6CDD1D) }
+
+// jitter returns a uniformly random duration in [0, d).
+//
+// Full jitter, rather than a fixed multiplier, is what stops a wave of retrying
+// transactions from colliding again in lockstep. The generator is splitmix64
+// over an atomically incremented counter: lock-free, well distributed, and
+// cheap enough for a hot path. It is not used for anything security-relevant,
+// which is why crypto/rand is not warranted here.
 func jitter(d time.Duration) time.Duration {
-	// xorshift: deterministic enough for backoff, no crypto/rand cost on a hot path.
-	jitterSeed ^= jitterSeed << 13
-	jitterSeed ^= jitterSeed >> 7
-	jitterSeed ^= jitterSeed << 17
 	if d <= 0 {
 		return 0
 	}
-	return time.Duration(jitterSeed % uint64(d))
+	z := jitterCounter.Add(0x9E3779B97F4A7C15)
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	z ^= z >> 31
+	return time.Duration(z % uint64(d))
 }

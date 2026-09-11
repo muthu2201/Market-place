@@ -51,14 +51,54 @@ func TestUUIDv7ConcurrentUniqueness(t *testing.T) {
 	wg.Wait()
 }
 
+// The forward drift implied by strict monotonicity is bounded, and it is
+// self-correcting: once generation drops below 4,096 per millisecond the clock
+// catches up. Both properties are asserted here so the documented guarantee
+// cannot silently regress.
+func TestUUIDv7DriftIsBoundedAndSelfCorrecting(t *testing.T) {
+	const burst = 100_000
+
+	// Drift INTRODUCED by this burst is what the bound governs. Measuring from
+	// wall-clock zero would also count drift left over from earlier tests in
+	// this binary, which is a different quantity.
+	first := NewUUIDv7()
+	startReal := time.Now()
+	var last UUID
+	for i := 0; i < burst; i++ {
+		last = NewUUIDv7()
+	}
+	realElapsed := time.Since(startReal)
+	embeddedElapsed := last.Time().Sub(first.Time())
+
+	introduced := embeddedElapsed - realElapsed
+	if introduced < 0 {
+		introduced = 0
+	}
+	maxDrift := time.Duration(burst/4096+2) * time.Millisecond
+	if introduced > maxDrift {
+		t.Fatalf("this burst introduced %v of drift, above the documented bound of %v", introduced, maxDrift)
+	}
+
+	// Self-correction: after a pause longer than any accumulated drift, the
+	// embedded timestamp tracks the wall clock again.
+	time.Sleep(200 * time.Millisecond)
+	if d := time.Since(NewUUIDv7().Time()); d < -5*time.Millisecond {
+		t.Fatalf("the generator did not catch up after a pause: still %v ahead", -d)
+	}
+}
+
 func TestUUIDRoundTripAndTime(t *testing.T) {
 	u := NewUUIDv7()
 	back, err := ParseUUID(u.String())
 	if err != nil || back != u {
 		t.Fatalf("round trip failed: %v %s %s", err, u, back)
 	}
-	if d := time.Since(u.Time()); d < 0 || d > time.Minute {
-		t.Fatalf("embedded time is off by %v", d)
+	// The embedded timestamp may run slightly ahead of the wall clock when an
+	// earlier test burned through a millisecond's 4,096-identifier budget; the
+	// generator borrows from the next millisecond to keep ordering strict.
+	// Both directions are bounded.
+	if d := time.Since(u.Time()); d < -time.Second || d > time.Minute {
+		t.Fatalf("embedded time is off by %v, outside the documented bound", d)
 	}
 	if _, err := ParseUUID("not-a-uuid"); err == nil {
 		t.Fatal("expected parse failure")

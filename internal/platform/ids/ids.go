@@ -30,9 +30,16 @@ var (
 	lastSeq uint16
 )
 
-// NewUUIDv7 returns a time-ordered UUID. Within the same millisecond a
-// monotonic 12-bit counter preserves ordering; if that counter saturates we
-// borrow from the next millisecond rather than emit an out-of-order value.
+// NewUUIDv7 returns a time-ordered UUID.
+//
+// Within a millisecond a monotonic 12-bit counter preserves ordering, giving
+// 4,096 identifiers per millisecond (about 4 million per second). Beyond that
+// the generator borrows from the next millisecond rather than emit an
+// out-of-order value, because strict monotonicity is what keeps B-tree inserts
+// at the right edge of the index. The cost is that under a sustained burst
+// above that rate the embedded timestamp can run ahead of the wall clock by
+// roughly (identifiers / 4096) milliseconds, and then catch up. Ordering is
+// always correct; the timestamp is accurate to within that bound.
 func NewUUIDv7() UUID {
 	var u UUID
 	if _, err := rand.Read(u[6:]); err != nil {
