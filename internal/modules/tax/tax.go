@@ -54,6 +54,8 @@ type Policy struct {
 	// of services as a taxable supply for s.52 purposes and collects TCS on its
 	// taxable value. This reading is contestable; confirm with a CA.
 	CollectTCSOnExports bool
+	// PlatformGSTIN is the platform's own GST registration.
+	PlatformGSTIN string
 	// PSPFeeBearer decides who absorbs payment-processing cost.
 	// "platform" (the default) is what makes the headline commission genuinely
 	// all-in; "seller" itemises it as a deduction instead.
@@ -102,6 +104,13 @@ func (p Policy) validate() error {
 	}
 	return nil
 }
+
+// PlatformGSTIN is the platform's own registration, used on the commission
+// invoice it raises to the seller.
+func (p Policy) PlatformGSTINOrEmpty() string { return p.PlatformGSTIN }
+
+// PlatformGSTIN is set by configuration; it is separate from the seller's.
+// Declared on Policy so the orders module does not need a second config path.
 
 // Seller describes the supplier for one line.
 type Seller struct {
