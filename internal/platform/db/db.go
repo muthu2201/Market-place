@@ -34,6 +34,17 @@ type Querier interface {
 	CopyFrom(ctx context.Context, table pgx.Identifier, cols []string, src pgx.CopyFromSource) (int64, error)
 }
 
+// Tx is a Querier that is statically known to be inside an explicit
+// transaction. Operations whose correctness depends on atomicity (posting a
+// journal entry with its lines, claiming an idempotency key alongside the work
+// it guards) take a Tx rather than a Querier, so calling them on a bare pool is
+// a compile error rather than a runtime surprise.
+type Tx interface {
+	Querier
+	// inTransaction is unexported so only this package can implement Tx.
+	inTransaction()
+}
+
 // DB wraps the pool with instrumentation and the transaction helpers.
 type DB struct {
 	pool     *pgxpool.Pool
@@ -149,7 +160,7 @@ var ErrRollback = errors.New("db: rollback requested")
 // deadlocks with exponential backoff and full jitter.
 //
 // fn MUST be idempotent: it can be executed more than once.
-func (d *DB) InTx(ctx context.Context, o TxOptions, fn func(ctx context.Context, tx Querier) error) error {
+func (d *DB) InTx(ctx context.Context, o TxOptions, fn func(ctx context.Context, tx Tx) error) error {
 	if o.Isolation == "" {
 		o.Isolation = pgx.RepeatableRead
 	}
@@ -194,7 +205,7 @@ func (d *DB) InTx(ctx context.Context, o TxOptions, fn func(ctx context.Context,
 	return fmt.Errorf("db: %s exhausted %d retries: %w", o.Name, d.maxRetry, lastErr)
 }
 
-func (d *DB) runOnce(ctx context.Context, o TxOptions, access pgx.TxAccessMode, fn func(context.Context, Querier) error) (err error) {
+func (d *DB) runOnce(ctx context.Context, o TxOptions, access pgx.TxAccessMode, fn func(context.Context, Tx) error) (err error) {
 	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: o.Isolation, AccessMode: access})
 	if err != nil {
 		return fmt.Errorf("db: begin %s: %w", o.Name, err)
@@ -224,6 +235,10 @@ func (d *DB) runOnce(ctx context.Context, o TxOptions, access pgx.TxAccessMode, 
 
 type txQuerier struct{ tx pgx.Tx }
 
+var _ Tx = txQuerier{}
+
+func (txQuerier) inTransaction() {}
+
 func (t txQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	return t.tx.Exec(ctx, sql, args...)
 }
@@ -237,6 +252,22 @@ func (t txQuerier) CopyFrom(ctx context.Context, table pgx.Identifier, cols []st
 	return t.tx.CopyFrom(ctx, table, cols, src)
 }
 
+// idempotencyConstraints are unique indexes that represent an "I claim this
+// key" race rather than a data error.
+//
+// Under REPEATABLE READ a concurrent transaction that commits after our
+// snapshot is invisible to us, so our own INSERT surfaces as 23505 rather than
+// as 40001. Retrying the whole unit of work takes a fresh snapshot, at which
+// point the winner's row is visible and the loser takes the replay path. Every
+// unit of work guarded by one of these keys is idempotent by construction,
+// which is exactly what makes the retry safe.
+var idempotencyConstraints = map[string]bool{
+	"journal_entries_idempotency_uq": true,
+	"idempotency_keys_unique_idx":    true,
+	"provider_webhook_events_uq":     true,
+	"jobs_unique_key_idx":            true,
+}
+
 // isRetryable reports whether an error is a transient concurrency conflict.
 func isRetryable(err error) bool {
 	var pgErr *pgconn.PgError
@@ -245,6 +276,8 @@ func isRetryable(err error) bool {
 		case "40001", // serialization_failure
 			"40P01": // deadlock_detected
 			return true
+		case "23505": // unique_violation
+			return idempotencyConstraints[pgErr.ConstraintName]
 		}
 	}
 	return false
