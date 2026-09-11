@@ -606,6 +606,7 @@ func (s *Service) transitionStamped(ctx context.Context, tx db.Tx, orderID ids.U
 		default:
 			return fmt.Errorf("orders: %q is not a stampable column", stampColumn)
 		}
+		//archcheck:allow SQL is parameterised -- stampColumn is matched against a closed set in the switch above and never derives from input; values still travel as bind parameters.
 		stmt = `UPDATE orders SET status = $2, ` + stampColumn + ` = COALESCE(` + stampColumn + `, $4) WHERE id = $1 AND status = $3`
 		args = append(args, stamp)
 	}

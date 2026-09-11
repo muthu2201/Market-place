@@ -267,8 +267,9 @@ func (m *MerchantOfRecord) CreateLinkedAccount(_ context.Context, req LinkedAcco
 	// Returning a synthetic activated account keeps the onboarding flow uniform
 	// while making it obvious in the ledger which model produced it.
 	return LinkedAccount{
-		ProviderAccountID:  "mor:" + req.SellerReference,
-		Status:             LinkedAccountActivated,
+		ProviderAccountID: "mor:" + req.SellerReference,
+		Status:            LinkedAccountActivated,
+		//archcheck:allow wall-clock time -- a merchant-of-record has no sub-merchant to activate; this synthetic timestamp keeps the onboarding shape uniform.
 		ActivatedAt:        time.Now().UTC(),
 		CanReceiveTransfer: false,
 		Raw:                map[string]any{"model": "merchant_of_record", "vendor": m.vendor},
@@ -338,6 +339,7 @@ func (m *MerchantOfRecord) ParseWebhook(_ context.Context, header http.Header, r
 		}
 	}
 	if ev.CreatedAt.IsZero() {
+		//archcheck:allow wall-clock time -- fallback when the vendor omits a timestamp; an adapter-boundary default.
 		ev.CreatedAt = time.Now().UTC()
 	}
 	if body.Data != nil {

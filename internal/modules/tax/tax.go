@@ -265,6 +265,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 		out.GSTRateBps = p.GSTBps
 		out.Explain = append(out.Explain, fmt.Sprintf(
 			"The seller and the place of supply are both in state %d, so GST is split as CGST %s + SGST %s at %.2f%% each.",
+			//archcheck:allow money is never a float -- renders a RATE as human-readable text; the amounts themselves are money.Money integers.
 			s.StateCode, cgst.Decimal(), cgst.Decimal(), float64(half)/100))
 	case InterState:
 		igst, err := l.ListPrice.ApplyBasisPoints(p.GSTBps, money.HalfUp)
@@ -275,6 +276,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 		out.GSTRateBps = p.GSTBps
 		out.Explain = append(out.Explain, fmt.Sprintf(
 			"The seller is in state %d and the place of supply is state %d, so IGST applies at %.2f%%.",
+			//archcheck:allow money is never a float -- renders a RATE as text.
 			s.StateCode, b.StateCode, float64(p.GSTBps)/100))
 	}
 
@@ -299,6 +301,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 	}
 	out.Explain = append(out.Explain, fmt.Sprintf(
 		"Platform commission is %.2f%% of the %s taxable value: %s, plus %.2f%% GST on that commission: %s.",
+		//archcheck:allow money is never a float -- renders RATES as text; every amount above is a money.Money integer.
 		float64(l.CommissionBps)/100, l.ListPrice.Decimal(), out.Commission.Decimal(),
 		float64(p.CommissionGSTBps)/100, out.CommissionGST.Decimal()))
 
@@ -334,6 +337,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 		out.TCSBps = p.TCSBps
 		out.Explain = append(out.Explain, fmt.Sprintf(
 			"TCS of %.2f%% (%s) was collected under section 52 of the CGST Act on the net taxable value and will be reported in GSTR-8 against GSTIN %s.",
+			//archcheck:allow money is never a float -- renders a RATE as text.
 			float64(p.TCSBps)/100, out.TCS.Decimal(), s.GSTIN))
 	}
 
@@ -347,6 +351,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 		out.TDSReason = "seller is not resident in India; section 194-O does not apply"
 	case !s.HasPAN:
 		tdsRate = p.TDSNoPANBps
+		//archcheck:allow money is never a float -- renders a RATE as text.
 		out.TDSReason = fmt.Sprintf("PAN not furnished, so the higher rate under section 206AA applies (%.2f%%)", float64(tdsRate)/100)
 	case s.ResidentIndividualOrHUF && belowThreshold(s.FYGrossSupplyMinor, l.ListPrice.Minor(), p.TDSThresholdMinor):
 		tdsRate = 0
@@ -354,6 +359,7 @@ func Compute(p Policy, s Seller, b Buyer, l Line, at time.Time) (Breakdown, erro
 			"resident individual/HUF whose gross supply for the financial year (%s including this sale) remains within the section 194-O threshold",
 			money.MustNew(s.FYGrossSupplyMinor+l.ListPrice.Minor(), cur).Decimal())
 	default:
+		//archcheck:allow money is never a float -- renders a RATE as text.
 		out.TDSReason = fmt.Sprintf("section 194-O applies at %.2f%%", float64(tdsRate)/100)
 	}
 	if tdsRate > 0 {

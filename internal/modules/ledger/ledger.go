@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/muthu2201/market-place/internal/platform/clock"
 	"github.com/muthu2201/market-place/internal/platform/db"
 	"github.com/muthu2201/market-place/internal/platform/ids"
 	"github.com/muthu2201/market-place/internal/platform/metrics"
@@ -143,10 +144,22 @@ type Posted struct {
 
 // Service posts and queries the journal.
 type Service struct {
-	m *metrics.App
+	m   *metrics.App
+	clk clock.Clock
 }
 
-func New(m *metrics.App) *Service { return &Service{m: m} }
+// New builds the service. The clock is injected so that entry timestamps are
+// controllable in tests and consistent with the rest of a unit of work.
+func New(m *metrics.App) *Service { return &Service{m: m, clk: clock.System()} }
+
+// NewWithClock is used where time must be controlled, chiefly in tests and in
+// back-dated corrections.
+func NewWithClock(m *metrics.App, clk clock.Clock) *Service {
+	if clk == nil {
+		clk = clock.System()
+	}
+	return &Service{m: m, clk: clk}
+}
 
 // Post writes a balanced entry.
 //
@@ -181,7 +194,7 @@ func (s *Service) Post(ctx context.Context, q db.Tx, e Entry) (Posted, error) {
 	publicID := ids.NewPublic(ids.PrefixJournal)
 	occurred := e.OccurredAt
 	if occurred.IsZero() {
-		occurred = time.Now().UTC()
+		occurred = s.clk.Now()
 	}
 	meta := e.Metadata
 	if meta == nil {

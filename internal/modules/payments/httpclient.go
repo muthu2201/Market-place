@@ -151,6 +151,7 @@ type request struct {
 }
 
 func (c *client) do(ctx context.Context, op string, r request, out any) (int, []byte, error) {
+	//archcheck:allow wall-clock time -- measures elapsed duration for a latency histogram, which needs the real monotonic clock rather than a controllable one.
 	start := time.Now()
 	defer func() {
 		if c.metrics != nil {

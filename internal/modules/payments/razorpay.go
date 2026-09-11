@@ -769,6 +769,7 @@ func (r *Razorpay) ParseWebhook(_ context.Context, header http.Header, rawBody [
 	if w.CreatedAt > 0 {
 		ev.CreatedAt = time.Unix(w.CreatedAt, 0).UTC()
 	} else {
+		//archcheck:allow wall-clock time -- fallback when the provider omits a timestamp; this is an adapter-boundary default, not platform behaviour under test.
 		ev.CreatedAt = time.Now().UTC()
 	}
 
