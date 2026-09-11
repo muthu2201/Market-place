@@ -7,5 +7,7 @@
 !.env.example
 /tmp/
 /pgdata/
+node_modules/
+coverage.*
 /var/
 /artifacts/
