@@ -1,0 +1,171 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketplace-api
+  labels:
+    app.kubernetes.io/name: marketplace
+    app.kubernetes.io/component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketplace
+      app.kubernetes.io/component: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketplace
+        app.kubernetes.io/component: api
+    spec:
+      # The application drains in HTTP_SHUTDOWN_GRACE (20s). This must exceed
+      # that plus the preStop sleep, or the kubelet's SIGKILL cuts off a
+      # checkout that is mid-capture.
+      terminationGracePeriodSeconds: 40
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread across nodes and zones. Three replicas on one node is one
+      # eviction away from an outage.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: marketplace
+              app.kubernetes.io/component: api
+
+      containers:
+        - name: api
+          image: ghcr.io/example/marketplace:v1
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: marketplace-config
+            - secretRef:
+                name: marketplace-secrets
+
+          # No preStop hook. Endpoint removal and SIGTERM race, and the usual
+          # fix is a preStop `sleep` — but a distroless image has no shell and
+          # no sleep binary, and adding one to get a pause would hand an
+          # attacker with code execution something to pivot with.
+          #
+          # The application handles it instead: on SIGTERM it reports not-ready
+          # for HTTP_DRAIN_DELAY while continuing to serve, so the Service stops
+          # sending before the process stops accepting, and only then begins
+          # graceful shutdown. Set HTTP_DRAIN_DELAY in the ConfigMap.
+
+          # Liveness deliberately does NOT touch the database: if it did, a
+          # database blip would make the kubelet kill every healthy replica at
+          # once and turn a degradation into an outage.
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/api", "-healthcheck"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # Readiness DOES check the database, so an instance that lost it
+          # leaves the Service instead of serving errors.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          # Boot runs configuration validation and opens the pool. A generous
+          # startup allowance stops a slow first connection being read as a
+          # crash loop.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            # Argon2id uses 64 MiB per concurrent hash by design, so the memory
+            # limit must leave room for several at once plus the connection
+            # pool. Too tight a limit turns a login burst into an OOM kill.
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {memory: 1Gi}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketplace-api
+  labels:
+    app.kubernetes.io/name: marketplace
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: marketplace
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: marketplace-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketplace
+      app.kubernetes.io/component: api
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: marketplace-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: marketplace-api
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    # CPU is an honest under-specification. The real signal is request latency
+    # or queue depth, which needs a metrics adapter these manifests cannot
+    # assume you have. Replace this when you do.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Slow to scale down: the database connection pool is the real ceiling,
+      # and flapping replicas churn connections for no benefit.
+      stabilizationWindowSeconds: 300

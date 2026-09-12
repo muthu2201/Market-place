@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/muthu2201/market-place/internal/modules/audit"
@@ -55,7 +56,22 @@ type Server struct {
 	// surface can be compared against docs/api/openapi.yaml by a test. A
 	// specification that drifts from the router is worse than none.
 	registered []string
+
+	// draining is set on SIGTERM, before the server stops accepting.
+	//
+	// Endpoint removal and process shutdown race: a load balancer keeps
+	// sending to a pod for a second or two after it is deleted, and if the
+	// process has already stopped accepting, those requests fail. Reporting
+	// not-ready first, then continuing to serve for a moment, closes that
+	// window from inside the application — where it belongs, rather than in a
+	// preStop hook that a distroless image has no shell to run.
+	draining atomic.Bool
 }
+
+// BeginDraining makes readiness fail while the server keeps serving.
+//
+// Call it on SIGTERM, wait for the load balancer to notice, then shut down.
+func (s *Server) BeginDraining() { s.draining.Store(true) }
 
 // RegisteredRoutes returns every route pattern the server serves, in
 // registration order, as "METHOD /path".
@@ -283,8 +299,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	// Readiness does depend on the database: an instance that cannot reach it
-	// should be taken out of the load balancer rather than serve errors.
+	// A draining instance reports not-ready while it is still serving, so the
+	// load balancer stops sending new work before the process stops accepting
+	// it. Liveness deliberately still passes: this instance is healthy, it is
+	// just on its way out, and a failing liveness probe here would have the
+	// kubelet kill it mid-drain.
+	if s.draining.Load() {
+		httpx.JSON(w, r, http.StatusServiceUnavailable, map[string]any{
+			"status": "draining", "reason": "shutting down",
+		})
+		return
+	}
+
+	// Readiness otherwise depends on the database: an instance that cannot
+	// reach it should be taken out of the load balancer rather than serve
+	// errors.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.db.Ping(ctx); err != nil {

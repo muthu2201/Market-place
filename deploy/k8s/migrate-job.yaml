@@ -1,0 +1,54 @@
+# Migrations run as their own Job, before the rollout.
+#
+# Not at API startup: N replicas starting together would race to migrate, and a
+# failed rollout would leave it ambiguous whether the schema had moved. A Job
+# that must complete first makes the order explicit and the failure loud.
+#
+# The consequence is that every migration must be backwards-compatible with the
+# currently running version for the length of the rollout. Dropping a column is
+# therefore two deploys — stop writing it, then drop it — never one. That is the
+# price of deploying without downtime.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Include the release version in the name: a Job is immutable, so reusing a
+  # name fails on the next deploy.
+  name: marketplace-migrate-v1
+  labels:
+    app.kubernetes.io/name: marketplace
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 2
+  # Kept briefly after success so the logs are readable when a deploy is
+  # investigated, then cleaned up automatically.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketplace
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/example/marketplace:v1
+          command: ["/usr/local/bin/migrate", "up"]
+          envFrom:
+            - configMapRef:
+                name: marketplace-config
+            - secretRef:
+                name: marketplace-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 256Mi}

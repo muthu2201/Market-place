@@ -84,6 +84,11 @@ process actually starts, then confirm each of these is deliberate:
 - [ ] On-call rota exists and knows these runbooks exist
 - [ ] Every runbook in this directory read once, before it is needed
 - [ ] Rollback procedure documented and rehearsed
+- [ ] **BLOCKING** The container image built and run once — the Dockerfile's
+      build commands are covered by CI, the image build itself is not
+- [ ] Deploy order confirmed: migrate as its own step, then workers, then API
+- [ ] `HTTP_DRAIN_DELAY` set, and shorter than the pod's termination grace minus
+      `HTTP_SHUTDOWN_GRACE`, or a deploy cuts off in-flight requests
 - [ ] Support has a written answer for "where is my money", derived from
       `ReleaseResult.HeldReasons`
 - [ ] Grievance SLA clock confirmed against `grievance_sla_watch`

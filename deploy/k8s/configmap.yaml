@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: marketplace-config
+  labels:
+    app.kubernetes.io/name: marketplace
+data:
+  APP_ENV: "production"
+  APP_PUBLIC_BASE_URL: "https://example.in"
+  HTTP_ADDR: "0.0.0.0:8080"
+
+  # Must cover every address the ingress sends from, and nothing wider. The
+  # application walks X-Forwarded-For right to left and stops at the first hop
+  # outside this list; an empty list would make the header authoritative, which
+  # is why production refuses to start without it.
+  HTTP_TRUSTED_PROXY_CIDRS: "10.0.0.0/8"
+
+  PAYMENTS_PROVIDER: "bridge"
+  RAZORPAY_BASE_URL: "https://api.razorpay.com"
+
+  STORAGE_DRIVER: "s3"
+  STORAGE_ENDPOINT: "https://<account>.r2.cloudflarestorage.com"
+  STORAGE_REGION: "auto"
+  STORAGE_BUCKET: "marketplace-assets"
+
+  ANTIVIRUS_DRIVER: "clamav"
+  CLAMAV_ADDRESS: "clamav:3310"
+
+  MAIL_DRIVER: "smtp"
+
+  PLATFORM_GSTIN: "33AAAAA0000A1Z5"
+  PLATFORM_STATE_CODE: "33"
+  COMMISSION_BPS: "900"
+
+  # At least 7: RuPay representment alone runs to seven working days, and
+  # production refuses a shorter window.
+  SETTLEMENT_HOLD_DAYS: "14"
+
+  # Password hashing is deliberately expensive (~123 ms). A large burst is a
+  # resource-exhaustion invitation, so production caps this at 200.
+  RATE_LIMIT_LOGIN_BURST: "20"
+
+  # On SIGTERM the API reports not-ready for this long while still serving, so
+  # the Service stops sending before the process stops accepting. This replaces
+  # the usual preStop sleep, which a distroless image has no shell to run.
+  HTTP_DRAIN_DELAY: "5s"
+
+  # Draining, then this, must fit inside terminationGracePeriodSeconds, or the
+  # kubelet's SIGKILL cuts off a request mid-flight. 5 + 20 < 40.
+  HTTP_SHUTDOWN_GRACE: "20s"

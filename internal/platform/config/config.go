@@ -57,6 +57,11 @@ type HTTPConfig struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownGrace     time.Duration
+	// DrainDelay is how long to report not-ready while still serving, before
+	// shutting down. It exists to let a load balancer stop sending before the
+	// process stops accepting. Zero outside an orchestrated deployment, where
+	// there is nothing to propagate to.
+	DrainDelay        time.Duration
 	MaxRequestBytes   int64
 	MaxUploadBytes    int64
 	TrustedProxyCIDRs []string
@@ -237,6 +242,7 @@ func Load() (*Config, error) {
 		WriteTimeout:      l.duration("HTTP_WRITE_TIMEOUT", 30*time.Second),
 		IdleTimeout:       l.duration("HTTP_IDLE_TIMEOUT", 90*time.Second),
 		ShutdownGrace:     l.duration("HTTP_SHUTDOWN_GRACE", 20*time.Second),
+		DrainDelay:        l.duration("HTTP_DRAIN_DELAY", 0),
 		MaxRequestBytes:   l.int64("HTTP_MAX_REQUEST_BYTES", 1<<20),
 		MaxUploadBytes:    l.int64("HTTP_MAX_UPLOAD_BYTES", 512<<20),
 		TrustedProxyCIDRs: l.list("HTTP_TRUSTED_PROXY_CIDRS", ""),

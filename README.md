@@ -111,6 +111,8 @@ test/e2e/     end-to-end suite against the real payment adapter
   testsupport/  gatewaysim (Razorpay wire protocol) · clamdsim (clamd INSTREAM)
 ops/          stress-test.sh
 docs/         adr · arch · api · security · runbooks · legal · operations
+deploy/       compose.yaml · k8s reference manifests
+Dockerfile    distroless, three binaries, archcheck runs in the build
 ```
 
 ## Running it
@@ -135,7 +137,6 @@ is missing is the Go and the surfaces:
 
 - Moderation, disputes, grievance and DSAR workflows
 - The SSR web surface (`web/templates`, `web/static`)
-- Deployment manifests
 
 The [compliance map](docs/legal/compliance-map.md) lists which regulatory
 obligations each of these discharges, and marks them pending there too.

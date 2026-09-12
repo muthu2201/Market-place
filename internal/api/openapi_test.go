@@ -50,24 +50,7 @@ func TestOpenAPIMatchesRoutes(t *testing.T) {
 // services may be nil: this exercises registration only.
 func publicRoutes(t *testing.T) []string {
 	t.Helper()
-	base, err := url.Parse("https://example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &Server{
-		cfg: &config.Config{
-			HTTP: config.HTTPConfig{
-				PublicBaseURL: base, AllowedOrigins: []string{"https://example.test"},
-				MaxRequestBytes: 1 << 20, WriteTimeout: 30 * time.Second,
-			},
-			Security: config.SecurityConfig{
-				CSRFKey: make([]byte, 32), SecureCookies: true, HSTSMaxAge: 180 * 24 * time.Hour,
-			},
-		},
-		clk:     clock.System(),
-		limiter: ratelimit.NewLocal(clock.System()),
-	}
-	s.rules = rulesFrom(s.cfg.Limits)
+	s := testServer(t)
 	_ = s.routes()
 
 	var out []string
@@ -127,6 +110,34 @@ func documentedRoutes(t *testing.T) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// testServer builds a Server with configuration and a limiter but no services.
+//
+// routes() never calls a handler, so nil services exercise registration only.
+// Handlers that need a service take one explicitly in their own tests.
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	base, err := url.Parse("https://example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		cfg: &config.Config{
+			HTTP: config.HTTPConfig{
+				PublicBaseURL: base, AllowedOrigins: []string{"https://example.test"},
+				MaxRequestBytes: 1 << 20, WriteTimeout: 30 * time.Second,
+			},
+			Security: config.SecurityConfig{
+				CSRFKey: make([]byte, 32), SecureCookies: true, HSTSMaxAge: 180 * 24 * time.Hour,
+			},
+		},
+		clk:       clock.System(),
+		limiter:   ratelimit.NewLocal(clock.System()),
+		startedAt: clock.System().Now(),
+	}
+	s.rules = rulesFrom(s.cfg.Limits)
+	return s
 }
 
 func contains(haystack []string, needle string) bool {
