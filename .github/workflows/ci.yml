@@ -1,0 +1,189 @@
+name: CI
+
+# Every guarantee the README claims is checked here. A claim that is only true
+# when someone remembers to run a command is not a guarantee.
+
+on:
+  # Scoped to the default branch on purpose: a pull-request branch would
+  # otherwise run the whole suite twice for one commit, once for the push and
+  # once for the pull request, doubling both wall-clock and billed minutes.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, and no automatic toolchain download: a build that silently fetches a
+  # different compiler is not reproducible.
+  GOTOOLCHAIN: local
+
+jobs:
+  static:
+    name: Format, vet and architecture rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Architecture fitness functions
+        # Module boundaries, no float64 near money, no time.Now() in business
+        # logic, no SQL built with fmt.Sprintf, no panic in request paths.
+        run: go run ./cmd/archcheck
+
+      - name: Module checksums
+        run: go mod verify
+
+      - name: go.mod and go.sum are tidy
+        run: |
+          cp go.mod go.mod.orig && cp go.sum go.sum.orig
+          go mod tidy
+          diff -u go.mod.orig go.mod || { echo "::error::go mod tidy changed go.mod"; exit 1; }
+          diff -u go.sum.orig go.sum || { echo "::error::go mod tidy changed go.sum"; exit 1; }
+
+  build:
+    name: Build all binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - name: Static binaries
+        run: |
+          for c in api worker migrate seed loadgen gatewaysim archcheck; do
+            CGO_ENABLED=0 go build -trimpath -o "/tmp/$c" "./cmd/$c"
+          done
+
+      - name: Dependency surface
+        # Dependency surface is attack surface. Eight modules reach the shipped
+        # binary; that number is a deliberate property, so growing it has to be
+        # an explicit edit here that a reviewer will ask about — not something
+        # that drifts in with a convenience import.
+        run: |
+          linked="$(go version -m /tmp/api | awk '$1=="dep"{print $2, $3}' | sort)"
+          echo "$linked"
+          count="$(printf '%s\n' "$linked" | wc -l)"
+          if [ "$count" -gt 8 ]; then
+            echo "::error::the api binary links $count modules, up from 8."
+            echo "::error::if this is intended, raise the ceiling in this workflow and say why in the PR."
+            exit 1
+          fi
+
+  test:
+    name: Tests (race detector, real database)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: marketplace
+          POSTGRES_PASSWORD: dev_local_only_pw
+          POSTGRES_DB: marketplace_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U marketplace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_DATABASE_URL: postgres://marketplace:dev_local_only_pw@127.0.0.1:5432/marketplace_test?sslmode=disable
+      # Without this, a misconfigured pipeline skips every integration test and
+      # reports green while proving nothing.
+      TEST_DATABASE_REQUIRED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U marketplace && exit 0
+            sleep 2
+          done
+          echo "::error::PostgreSQL never became ready"; exit 1
+
+      - name: Migrations apply from scratch, with no drift
+        run: |
+          go run ./cmd/migrate up
+          go run ./cmd/migrate verify
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+
+      - name: Tests with the race detector
+        # The race detector found a real data race in the transaction retry
+        # jitter that no amount of reading would have. It runs on everything.
+        run: go test -race -timeout 20m ./...
+
+      - name: Money and tax property tests, extended
+        # The short run is part of `go test ./...` above. This is the long one:
+        # conservation over a far larger slice of the input space.
+        run: go test -race -count=4 ./internal/platform/money/ ./internal/modules/tax/
+
+  stress:
+    name: Load test and invariant verification
+    runs-on: ubuntu-latest
+    # The stress test is the highest-value check in the repository — it found
+    # six concurrency defects that were invisible to review. It is also slow,
+    # so it runs on the default branch and on demand rather than on every push.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: marketplace
+          POSTGRES_PASSWORD: dev_local_only_pw
+          POSTGRES_DB: marketplace_load
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U marketplace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run the stress test
+        # Exits non-zero if the error rate exceeds one percent or if any
+        # invariant broke: trial balance, audit chain, order reconciliation.
+        run: ops/stress-test.sh
+        env:
+          DURATION: 20s
+          WORKERS: "32"

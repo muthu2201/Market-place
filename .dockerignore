@@ -1,0 +1,12 @@
+# Keep the build context small and free of anything secret.
+.git
+.github
+docs
+ops
+var
+web/static/dist
+*.md
+!README.md
+.env
+.env.*
+*.log

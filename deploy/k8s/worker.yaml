@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketplace-worker
+  labels:
+    app.kubernetes.io/name: marketplace
+    app.kubernetes.io/component: worker
+spec:
+  # Two replicas is safe and useful. The outbox dispatcher and the job runner
+  # both claim with FOR UPDATE SKIP LOCKED, so they never collide; scheduled
+  # tasks sit behind a leader advisory lock, so they never duplicate. Running
+  # several workers therefore buys redundancy and costs nothing in correctness.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketplace
+      app.kubernetes.io/component: worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketplace
+        app.kubernetes.io/component: worker
+    spec:
+      # Longer than the API's: a job may be scanning a large upload, and the
+      # job timeout is 20 minutes. A worker killed mid-job loses nothing —
+      # the claim expires and another worker retries — but letting it finish
+      # avoids a needless retry of expensive work.
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: worker
+          image: ghcr.io/example/marketplace:v1
+          command: ["/usr/local/bin/worker"]
+          envFrom:
+            - configMapRef:
+                name: marketplace-config
+            - secretRef:
+                name: marketplace-secrets
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            # Higher memory than the API: asset scanning streams in 64 KiB
+            # chunks, but provenance extraction reads up to 32 MiB of an asset
+            # into memory to find a C2PA manifest and hash an image.
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 1Gi}
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: marketplace-worker
+spec:
+  # Not needed for correctness — zero workers means work waits, not work lost —
+  # but a node drain should not silently stop all background processing,
+  # including settlement release and the trial-balance verification.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketplace
+      app.kubernetes.io/component: worker

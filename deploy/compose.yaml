@@ -1,0 +1,125 @@
+# The whole stack, locally.
+#
+# This is a development and integration-testing configuration. It is NOT a
+# production deployment: the secrets below are fixed and public, TLS terminates
+# nowhere, and PostgreSQL keeps its data in a local volume. Every one of those
+# is refused by the configuration loader under APP_ENV=production, so this
+# cannot be promoted by accident.
+
+name: marketplace
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: dev_local_only_pw
+      POSTGRES_DB: marketplace
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  clamav:
+    image: clamav/clamav:stable
+    # The signature database is several hundred megabytes and is downloaded on
+    # first start, so the first boot is slow. The long start_period stops the
+    # orchestrator killing it mid-download and starting over forever.
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 5m
+    volumes:
+      - clamdb:/var/lib/clamav
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://marketplace:dev_local_only_pw@postgres:5432/marketplace?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/api"]
+    ports: ["8080:8080"]
+    environment: &appenv
+      APP_ENV: development
+      APP_PUBLIC_BASE_URL: http://localhost:8080
+      HTTP_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://marketplace:dev_local_only_pw@postgres:5432/marketplace?sslmode=disable
+
+      # Fixed, public, and development-only. Each decodes to exactly 32 bytes,
+      # which the loader requires; the loader refuses every one of these shapes
+      # under APP_ENV=production.
+      DATA_KEK: ZGV2ZWxvcG1lbnQtb25seS1kYXRhLWtlay12YWx1ZSE=
+      SESSION_SIGNING_KEY: ZGV2ZWxvcG1lbnQtb25seS1zZXNzaW9uLWtleSEhISE=
+      CSRF_SIGNING_KEY: ZGV2ZWxvcG1lbnQtb25seS1jc3JmLWtleSEhISEhISE=
+      DOWNLOAD_SIGN_KEY: ZGV2ZWxvcG1lbnQtb25seS1kb3dubG9hZC1rZXkhISE=
+
+      # The bridge adapter speaks the Razorpay wire protocol, so it needs
+      # credentials even though it does not split settlement. These are
+      # placeholders: point RAZORPAY_BASE_URL at the provider's sandbox and
+      # supply real test credentials before any payment path will work.
+      PAYMENTS_PROVIDER: bridge
+      RAZORPAY_KEY_ID: rzp_test_development_placeholder
+      RAZORPAY_KEY_SECRET: development_placeholder_secret
+      RAZORPAY_WEBHOOK_SECRET: development_placeholder_webhook_secret
+      STORAGE_DRIVER: filesystem
+      STORAGE_LOCAL_ROOT: /var/objects
+      MAIL_DRIVER: log
+
+      ANTIVIRUS_DRIVER: clamav
+      CLAMAV_ADDRESS: clamav:3310
+
+      PLATFORM_GSTIN: 33AAAAA0000A1Z5
+      PLATFORM_STATE_CODE: "33"
+      COMMISSION_BPS: "900"
+      METRICS_TOKEN: development-metrics-token
+    volumes:
+      - objects:/var/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness only. Readiness is /readyz, which does check the database.
+      test: ["CMD", "/usr/local/bin/api", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/worker"]
+    environment: *appenv
+    volumes:
+      - objects:/var/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  clamdb:
+  objects:
