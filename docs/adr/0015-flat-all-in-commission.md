@@ -47,22 +47,34 @@ level of friction a promise like this deserves.
 
 ## The arithmetic
 
-On a ₹1,000 sale, all-inclusive:
+A ₹1,000 listing, sold intra-state by a GST-registered seller who bears the
+processing cost. Every figure is asserted against the implementation by
+`TestWorkedExampleMatchesDocs`:
 
-| Line | Amount | To whom |
+| Line | Amount | Whose money it is |
 |---|---|---|
-| Order value | ₹1,000.00 | — |
-| Platform commission (9%) | ₹90.00 | Platform |
-| GST on commission (18%) | ₹16.20 | Government, on the platform's service |
-| Payment processing (~2% + GST) | ~₹23.60 | Provider, at cost |
-| TCS u/s 52 (1% of net) | ₹10.00 | Government, credited to the seller |
-| TDS u/s 194-O (0.1%) | ₹1.00 | Government, credited to the seller |
-| **Seller receives** | **~₹859.20** | |
+| List price (taxable value) | ₹1,000.00 | The seller's price |
+| GST on the supply @18% (CGST ₹90 + SGST ₹90) | ₹180.00 | The seller's tax, collected through us |
+| **Buyer pays** | **₹1,180.00** | |
+| Platform commission @9% of the taxable value | ₹90.00 | **Platform** — the only line that is ours |
+| GST on that commission @18% | ₹16.20 | Government, on the platform's service |
+| Payment processing @2% of the buyer total + GST | ₹23.60 + ₹4.25 | Provider, at cost |
+| TCS u/s 52 @1% (CGST ₹5 + SGST ₹5) | ₹10.00 | Government — **creditable to the seller** |
+| TDS u/s 194-O @0.1% | ₹1.00 | Government — **creditable to the seller** |
+| **Seller receives** | **₹1,034.95** | |
 
-The TCS and TDS lines are not costs — they are the seller's own tax, collected at
-source and creditable against their liability. Showing them as deductions without
-that explanation is how sellers conclude a platform charges 14%. The seller
-statement says so in words, on every line.
+The commission is charged on the ₹1,000, never on the ₹1,180. Taking a
+percentage of the GST would be charging the seller for the government's money.
+
+TCS and TDS are not costs. They are the seller's own tax, collected at source
+and creditable against their liability — so the seller's position is ₹1,034.95
+received, less the ₹180 GST they owe on their supply, plus ₹11.00 of credits.
+Showing those two lines as deductions without that sentence is how sellers
+conclude a platform charges 14%, so the seller statement says it in words on
+every line.
+
+Where the platform absorbs the processing cost instead, the seller receives
+₹1,062.80 and the platform's ₹90.00 commission becomes ₹66.40 after the fee.
 
 At 9%, the platform is below the effective all-in rate of every major incumbent
 in this category, while every component above is verifiable by the seller from
