@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -270,6 +271,82 @@ func (s *S3) PresignGet(_ context.Context, key string, ttl time.Duration, filena
 		extra.Set("response-content-type", "application/octet-stream")
 	}
 	return s.signer.presign(http.MethodGet, u, host, ttl, extra, s.clk.Now()), nil
+}
+
+// PresignPut issues a direct-upload URL for the quarantine prefix.
+//
+// The content type is bound into the signature, so a seller who asked to upload
+// a font cannot substitute something the browser would execute if it were ever
+// served. That is belt-and-braces — the quarantine prefix is not served at all,
+// and magic-byte detection runs afterwards regardless — but a signature that
+// constrains what it authorises costs nothing.
+func (s *S3) PresignPut(_ context.Context, key string, ttl time.Duration, contentType string, maxBytes int64) (string, error) {
+	if err := ValidateKey(key); err != nil {
+		return "", err
+	}
+	if ttl <= 0 || ttl > 6*time.Hour {
+		// Long enough for a large upload on a poor connection, short enough
+		// that a leaked URL is not a standing write grant.
+		return "", fmt.Errorf("storage: upload lifetime must be between 1 second and 6 hours")
+	}
+	if maxBytes <= 0 {
+		return "", fmt.Errorf("storage: an upload size limit is required")
+	}
+	u, host := s.objectURL(key)
+	extra := url.Values{}
+	if contentType != "" {
+		extra.Set("Content-Type", contentType)
+	}
+	return s.signer.presign(http.MethodPut, u, host, ttl, extra, s.clk.Now()), nil
+}
+
+// Copy performs a server-side copy, so promoting a 2 GiB asset out of
+// quarantine costs one request rather than 2 GiB of transfer in each direction.
+func (s *S3) Copy(ctx context.Context, srcKey, dstKey string) error {
+	if err := ValidateKey(srcKey); err != nil {
+		return err
+	}
+	if err := ValidateKey(dstKey); err != nil {
+		return err
+	}
+	u, host := s.objectURL(dstKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Host = host
+	// The source is named by bucket and key, URL-escaped path-style, which is
+	// what both S3 and R2 expect.
+	req.Header.Set("x-amz-copy-source", "/"+s.bucket+"/"+srcKey)
+	s.signer.sign(req, emptyPayloadHash, s.clk.Now())
+
+	resp, err := s.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("storage: copy %s to %s: %w", srcKey, dstKey, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		drain(resp)
+		return ErrNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		err := s3Error("copy", dstKey, resp)
+		drain(resp)
+		return err
+	}
+
+	// S3 reports a mid-copy failure inside a 200 response body. This is the one
+	// operation where the status code alone is not the answer, and a copy that
+	// silently did not happen would leave an asset that scanned clean pointing
+	// at nothing.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	drain(resp)
+	if readErr != nil {
+		return fmt.Errorf("storage: reading the copy result for %s: %w", dstKey, readErr)
+	}
+	if bytes.Contains(body, []byte("<Error")) {
+		return fmt.Errorf("storage: copy %s to %s failed after the response began: %s", srcKey, dstKey, body)
+	}
+	return nil
 }
 
 func infoFromResponse(key string, resp *http.Response) ObjectInfo {

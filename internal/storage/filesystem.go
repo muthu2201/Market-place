@@ -221,4 +221,52 @@ func (f *Filesystem) PresignGet(context.Context, string, time.Duration, string) 
 	return "", ErrPresignUnsupported
 }
 
+// PresignPut is not available on the filesystem adapter. A direct upload needs
+// a URL the seller's browser can PUT to, and this adapter has no HTTP surface
+// of its own — the API streams the body through instead, which is acceptable
+// for the single-node development deployment this adapter exists for.
+func (f *Filesystem) PresignPut(context.Context, string, time.Duration, string, int64) (string, error) {
+	return "", ErrPresignUnsupported
+}
+
+// Copy promotes an object between prefixes.
+func (f *Filesystem) Copy(ctx context.Context, srcKey, dstKey string) error {
+	src, err := f.path(srcKey)
+	if err != nil {
+		return err
+	}
+	dst, err := f.path(dstKey)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	// Write to a temporary name and rename, so a reader never observes a
+	// half-copied object at the destination key.
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".copy-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dst)
+}
+
 var _ Store = (*Filesystem)(nil)

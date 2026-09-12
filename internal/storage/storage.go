@@ -68,6 +68,18 @@ type Store interface {
 	// which is how delivery avoids proxying bytes through the application.
 	// Returns ErrPresignUnsupported when the adapter cannot do this.
 	PresignGet(ctx context.Context, key string, ttl time.Duration, downloadFilename string) (string, error)
+
+	// PresignPut returns a time-limited URL a seller can upload to directly.
+	//
+	// Uploads go to a quarantine prefix that delivery never reads from, so an
+	// object that has not yet been scanned cannot be served even by a bug: the
+	// safety property is the prefix, not a flag someone has to remember to
+	// check. Returns ErrPresignUnsupported when the adapter cannot do this.
+	PresignPut(ctx context.Context, key string, ttl time.Duration, contentType string, maxBytes int64) (string, error)
+
+	// Copy moves an object server-side, which is how a scanned-clean upload is
+	// promoted out of quarantine without the bytes passing through here.
+	Copy(ctx context.Context, srcKey, dstKey string) error
 }
 
 var (
