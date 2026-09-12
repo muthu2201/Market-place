@@ -203,6 +203,12 @@ func (w *Worker) Tasks() []Task {
 		},
 		{Name: "send_queued_mail", Every: 15 * time.Second, Jitter: 3 * time.Second, Run: w.sendQueuedMail},
 		{
+			// Work, as distinct from the outbox's announcements: slow, retried
+			// with backoff, and claimed SKIP LOCKED so one long scan never
+			// blocks the queue behind it.
+			Name: "run_jobs", Every: 5 * time.Second, Jitter: 2 * time.Second, Run: w.runJobs,
+		},
+		{
 			Name: "expire_download_grants", Every: 10 * time.Minute, Jitter: time.Minute,
 			Run: func(ctx context.Context) (string, error) {
 				n, err := w.app.Delivery.ExpireGrants(ctx, 24*time.Hour)

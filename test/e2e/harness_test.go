@@ -29,6 +29,7 @@ import (
 	"github.com/muthu2201/market-place/internal/platform/cryptox"
 	"github.com/muthu2201/market-place/internal/platform/dbtest"
 	"github.com/muthu2201/market-place/internal/storage"
+	"github.com/muthu2201/market-place/internal/testsupport/clamdsim"
 	"github.com/muthu2201/market-place/internal/testsupport/gatewaysim"
 )
 
@@ -39,12 +40,17 @@ type env struct {
 	gateway *gatewaysim.Harness
 	clk     *clock.Fixed
 	store   storage.Store
+	clamd   *clamdsim.Harness
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	d := dbtest.Fresh(t)
 	gw := gatewaysim.Start(t)
+	// A real antivirus client against a simulator speaking the real protocol,
+	// for the same reason the payment adapter runs against a gateway simulator:
+	// what gets exercised is the production code path, framing included.
+	av := clamdsim.Start(t)
 
 	provider, err := payments.NewRazorpay(payments.RazorpayConfig{
 		BaseURL: gw.URL(), KeyID: gw.Cfg.KeyID, KeySecret: gw.Cfg.KeySecret,
@@ -71,6 +77,8 @@ func newEnv(t *testing.T) *env {
 		"STORAGE_DRIVER":      "filesystem",
 		"MAIL_DRIVER":         "log",
 		"PLATFORM_GSTIN":      "33AAAAA0000A1Z5",
+		"ANTIVIRUS_DRIVER":    "clamav",
+		"CLAMAV_ADDRESS":      av.Address(),
 		"PLATFORM_STATE_CODE": "33",
 		"COMMISSION_BPS":      "900",
 		"METRICS_TOKEN":       "test-metrics-token",
@@ -93,7 +101,7 @@ func newEnv(t *testing.T) *env {
 	srv := httptest.NewServer(application.Server.Handler())
 	t.Cleanup(srv.Close)
 
-	return &env{t: t, app: application, server: srv, gateway: gw, clk: clk, store: store}
+	return &env{t: t, app: application, server: srv, gateway: gw, clk: clk, store: store, clamd: av}
 }
 
 func setenv(t *testing.T, kv map[string]string) {

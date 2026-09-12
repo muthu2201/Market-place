@@ -54,6 +54,8 @@ or it did not happen.
 | `GET /api/v1/library`, `POST …/download/{asset}` | session | Entitlements and grant issue |
 | `GET /downloads/{grant}` | grant | Redeems a grant to a presigned redirect |
 | `POST /webhooks/payments` | HMAC | Raw-body signature, de-duplicated |
+| `POST /api/v1/seller/onboard` | session | Becoming a seller; grants the role |
+| `/api/v1/seller/*` | seller role | Payout destinations and the catalogue write path |
 | `GET /api/v1/admin/*` | role | Trial balance, audit verification, outbox status |
 | `GET /internal/verify/*` | internal token | Nine consistency checks, for monitoring |
 
@@ -71,12 +73,20 @@ so a duplicate run is a no-op rather than a correction.
 | `verify_trial_balance` | 5 min | **Asserts debits equal credits per currency** |
 | `verify_audit_chain` | 1 hour | **Walks the hash chain and detects tampering** |
 | `send_queued_mail` | 15 s | Drains the mail queue over STARTTLS |
+| `run_jobs` | 5 s | Drains the work queue: asset scanning, payout-change notices |
 | `expire_download_grants` | 10 min | Closes grants past their window |
 | `expire_stale_orders` | 5 min | Releases pending orders that were never paid |
 | `grievance_sla_watch` | 10 min | Flags grievances approaching their statutory deadline |
 | `purge_expired_idempotency_keys` | 1 hour | Bounded retention |
 | `prune_login_attempts` | 6 hours | Bounded retention |
 | `sweep_expired_sessions` | 1 hour | Bounded retention |
+
+`run_jobs` is distinct from the outbox, and the distinction is worth keeping
+straight. The outbox carries *announcements* — things that happened, which the
+world needs telling about. `jobs` carries *work* — things that still need doing,
+which may be slow and must be retried with backoff. Scanning a 2 GiB upload is
+work: putting it on the outbox would block announcement delivery behind it for
+minutes at a time. Both claim with `SKIP LOCKED`, so neither blocks itself.
 
 The two `verify_*` tasks are the system's own auditors. They do not repair
 anything: they raise, because a trial balance that does not zero means something

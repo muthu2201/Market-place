@@ -12,13 +12,16 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/muthu2201/market-place/internal/antivirus"
 	"github.com/muthu2201/market-place/internal/api"
 	"github.com/muthu2201/market-place/internal/modules/audit"
+	"github.com/muthu2201/market-place/internal/modules/catalog"
 	"github.com/muthu2201/market-place/internal/modules/delivery"
 	"github.com/muthu2201/market-place/internal/modules/identity"
 	"github.com/muthu2201/market-place/internal/modules/ledger"
 	"github.com/muthu2201/market-place/internal/modules/orders"
 	"github.com/muthu2201/market-place/internal/modules/payments"
+	"github.com/muthu2201/market-place/internal/modules/seller"
 	"github.com/muthu2201/market-place/internal/modules/tax"
 	"github.com/muthu2201/market-place/internal/platform/clock"
 	"github.com/muthu2201/market-place/internal/platform/config"
@@ -46,6 +49,9 @@ type App struct {
 	Provider payments.Provider
 	Orders   *orders.Service
 	Delivery *delivery.Service
+	Catalog  *catalog.Service
+	Seller   *seller.Service
+	Scanner  antivirus.Scanner
 	Store    storage.Store
 	Audit    *audit.Service
 	Limiter  *ratelimit.Local
@@ -184,10 +190,48 @@ func Build(ctx context.Context, cfg *config.Config, opts Options) (*App, error) 
 		return nil, err
 	}
 
+	scanner, err := antivirus.New(antivirus.Config{
+		Driver: cfg.Antivirus.Driver, Address: cfg.Antivirus.Address,
+		Timeout: cfg.Antivirus.Timeout, MaxBytes: cfg.Antivirus.MaxBytes,
+		ChunkSize: cfg.Antivirus.ChunkSize,
+	}, opts.Clock.Now)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+
+	catalogSvc, err := catalog.New(catalog.Options{
+		DB: database, Store: store, Scanner: scanner, Audit: auditSvc,
+		Clock: opts.Clock, Log: log, MaxAssetBytes: cfg.Antivirus.MaxBytes,
+	})
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+
+	// The payout fingerprint pepper is derived from the deployment KEK rather
+	// than configured separately: one fewer secret to rotate, and it inherits
+	// the KEK's custody. Deriving rather than reusing keeps a fingerprint
+	// useless for decrypting anything.
+	payoutPepper, err := cryptox.DeriveKey(cfg.Security.DataKEK, "seller-payout-fingerprint", nil)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	sellerSvc, err := seller.New(seller.Options{
+		DB: database, Vault: vault, Provider: provider, Audit: auditSvc,
+		Clock: opts.Clock, Log: log, PayoutPepper: payoutPepper,
+	})
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+
 	server, err := api.New(api.Dependencies{
 		Config: cfg, DB: database, Log: log, Metrics: m, Registry: registry,
 		Clock: opts.Clock, Identity: identitySvc, Orders: ordersSvc,
 		Delivery: deliverySvc, Ledger: ledgerSvc, Audit: auditSvc,
+		Catalog: catalogSvc, Seller: sellerSvc,
 	})
 	if err != nil {
 		database.Close()
@@ -198,6 +242,7 @@ func Build(ctx context.Context, cfg *config.Config, opts Options) (*App, error) 
 		slog.String("env", string(cfg.Env)),
 		slog.String("payment_provider", provider.Name()),
 		slog.String("storage_driver", store.Name()),
+		slog.String("antivirus_driver", scanner.Name()),
 		slog.Bool("split_settlement", provider.Capabilities().SplitSettlement),
 		slog.Int("commission_bps", int(cfg.Tax.CommissionBps)),
 	)
@@ -211,6 +256,7 @@ func Build(ctx context.Context, cfg *config.Config, opts Options) (*App, error) 
 		Config: cfg, Log: log, DB: database, Metrics: m, Registry: registry,
 		Clock: opts.Clock, Vault: vault, Identity: identitySvc, Ledger: ledgerSvc,
 		Provider: provider, Orders: ordersSvc, Delivery: deliverySvc, Store: store,
+		Catalog: catalogSvc, Seller: sellerSvc, Scanner: scanner,
 		Audit: auditSvc, Limiter: limiter, Server: server,
 	}, nil
 }

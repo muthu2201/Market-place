@@ -50,6 +50,11 @@ tags:
     description: Checkout, payment, refunds. Session required.
   - name: Delivery
     description: Entitlements and download grants. Session required.
+  - name: Seller
+    description: >-
+      Onboarding, payout destinations and the catalogue write path. Requires the
+      seller role, which onboarding grants. Verification gates publishing and
+      settlement separately, so a pending seller can build a listing.
   - name: Webhooks
     description: Called by the payment provider. HMAC-authenticated.
   - name: Transparency
@@ -669,6 +674,463 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
 
+
+  # ------------------------------------------------------------------- seller
+  /api/v1/seller/onboard:
+    post:
+      tags: [Seller]
+      summary: Register as a seller
+      description: |
+        Creates a seller profile in `pending` state and grants the seller role.
+
+        The legal name is encrypted under the caller's own subject key before it
+        reaches a column, so a later erasure request destroys it along with
+        everything else about that person while the financial record survives.
+
+        A GSTIN is validated by computing its check digit, and characters 3–12
+        are cross-checked against the PAN — a GSTIN embeds its holder's PAN, so
+        a mismatch is a typo or somebody else's registration, and both are worth
+        catching before a TCS return is filed against the wrong party.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [handle, display_name, legal_name]
+              properties:
+                handle: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{2,31}$" }
+                display_name: { type: string, minLength: 2, maxLength: 120 }
+                bio: { type: string, maxLength: 2000 }
+                legal_name: { type: string, minLength: 2, maxLength: 200 }
+                entity_type:
+                  type: string
+                  enum: [individual, huf, proprietorship, partnership, llp, private_limited, public_limited, trust, society, foreign]
+                country: { type: string, example: IN }
+                state_code: { type: integer, description: GST state code; required for Indian sellers. }
+                pan: { type: string, pattern: "^[A-Z]{5}[0-9]{4}[A-Z]$" }
+                gstin: { type: string, pattern: "^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$" }
+      responses:
+        "201":
+          description: Seller profile created, pending verification
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  seller_id: { type: string }
+                  handle: { type: string }
+                  status: { type: string, enum: [pending] }
+                  kyc_status: { type: string }
+                  note: { type: string }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/seller/kyc/submit:
+    post:
+      tags: [Seller]
+      summary: Submit for verification
+      responses:
+        "202": { description: Submitted for review }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Already under review, or a prerequisite is missing.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/seller/payouts:
+    get:
+      tags: [Seller]
+      summary: Payout status and destinations
+      description: |
+        The answer to "where is my money", from the same rules settlement uses.
+
+        `payable` is false until **all** of these hold: the seller account is
+        active, identity verification is complete, the payment **provider** has
+        activated the linked account — their view, not ours, because ours is a
+        cache and a cache is not an authorisation — the destination has passed
+        name-matched validation, and its 48-hour quarantine has elapsed.
+
+        Account numbers are never returned. `last4` and the IFSC are enough to
+        recognise an account and not enough to pay it.
+      responses:
+        "200":
+          description: Eligibility and destinations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payable: { type: boolean }
+                  reasons:
+                    type: array
+                    items: { type: string }
+                    description: Written for the seller. Empty when payable.
+                  accounts:
+                    type: array
+                    items: { $ref: "#/components/schemas/PayoutAccount" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/seller/payouts/accounts:
+    post:
+      tags: [Seller]
+      summary: Add a payout destination
+      description: |
+        **Every** new or changed destination is quarantined for 48 hours, and the
+        existing destination keeps receiving settlement meanwhile. A seller is
+        notified in the same transaction as the change.
+
+        This is the control that makes account takeover survivable: an attacker
+        who adds a destination must also survive two days of the real seller
+        reading that notification. The first destination is not exempt — 48
+        hours sits inside the settlement hold anyway, so it costs a legitimate
+        seller nothing, and exempting it would hand an attacker the exemption.
+
+        Bank details are encrypted under the seller's subject key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_number, beneficiary_name]
+              properties:
+                method: { type: string, enum: [bank_account, vpa], default: bank_account }
+                account_number:
+                  type: string
+                  description: The bank account number, or the UPI ID when method is vpa.
+                ifsc: { type: string, pattern: "^[A-Z]{4}0[A-Z0-9]{6}$" }
+                beneficiary_name:
+                  type: string
+                  description: >-
+                    Checked against the penny-drop result. This is what catches a
+                    mistyped account number that belongs to a real stranger.
+      responses:
+        "201":
+          description: Destination added, quarantined
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PayoutAccount"
+                  - type: object
+                    properties:
+                      note: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/seller/payouts/accounts/{id}:
+    delete:
+      tags: [Seller]
+      summary: Disable a payout destination
+      description: >-
+        Immediate, with no cool-off. Stopping money going somewhere is the safe
+        direction, and an attacker gains nothing by disabling an account they do
+        not control.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Disabled }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/products:
+    post:
+      tags: [Seller]
+      summary: Create a draft listing
+      description: |
+        A draft may be saved with `ai_disclosure` omitted — the declaration is
+        required to publish, not to start writing. Everything else can arrive in
+        whatever order suits the seller.
+
+        Tags are free text. A wrangling pipeline maps synonyms onto canonical
+        tags behind the scenes; the seller's own wording is what gets displayed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category_id, title, summary, description, delivery_type, license_type, license_terms]
+              properties:
+                category_id: { type: string }
+                title: { type: string, minLength: 3, maxLength: 140 }
+                summary: { type: string, minLength: 10, maxLength: 300 }
+                description: { type: string, minLength: 10, maxLength: 20000 }
+                delivery_type: { type: string, enum: [download, streamed_access, license_key, hosted_access] }
+                license_type: { type: string, enum: [personal, commercial, extended, editorial, open_source] }
+                license_terms: { type: string, minLength: 10, maxLength: 20000 }
+                license_duration_days: { type: integer, minimum: 1, nullable: true }
+                ai_disclosure:
+                  type: string
+                  enum: [undeclared, no_ai, ai_assisted, ai_generated, ai_generated_edited]
+                ai_disclosure_note: { type: string, maxLength: 2000 }
+                refund_policy:
+                  type: string
+                  enum: [no_refund_after_download, refundable_14_days, no_refund, case_by_case]
+                tags: { type: array, maxItems: 30, items: { type: string } }
+      responses:
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product_id: { type: string }
+                  slug: { type: string }
+                  status: { type: string, enum: [draft] }
+                  title: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/seller/products/{id}/variants:
+    post:
+      tags: [Seller]
+      summary: Add a priced option
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, price_minor]
+              properties:
+                name: { type: string, maxLength: 80 }
+                price_minor: { type: integer, format: int64, minimum: 0 }
+                currency: { type: string, default: INR }
+                max_sales:
+                  type: integer
+                  minimum: 1
+                  nullable: true
+                  description: Caps total sales, for a limited edition.
+      responses:
+        "201":
+          description: Option added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variant_id: { type: string }
+                  name: { type: string }
+                  price: { $ref: "#/components/schemas/Money" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/products/{id}/tags:
+    put:
+      tags: [Seller]
+      summary: Replace a listing's tags
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags: { type: array, maxItems: 30, items: { type: string } }
+      responses:
+        "204": { description: Tags replaced }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/products/{id}/uploads:
+    post:
+      tags: [Seller]
+      summary: Request an upload slot
+      description: |
+        Returns a short-lived URL to PUT the file to. No database row is created
+        yet: the asset record is written at finalisation from the bytes that
+        actually arrived, because size and checksum are immutable once stored
+        and must therefore be right the first time.
+
+        The upload lands in a quarantine prefix. When the asset later scans
+        clean it is promoted server-side to the location its record names —
+        which means an unscanned asset's object key resolves to nothing at all,
+        so there is no unscanned file to serve even if every other control
+        failed.
+
+        When `direct` is false the adapter cannot presign and `url` is a path on
+        this API to stream the body through instead.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, content_type, size_bytes]
+              properties:
+                filename: { type: string, maxLength: 255 }
+                content_type: { type: string }
+                size_bytes: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Somewhere to put the bytes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upload_id: { type: string }
+                  url: { type: string }
+                  method: { type: string, const: PUT }
+                  headers: { type: object, additionalProperties: { type: string } }
+                  expires_at: { type: string, format: date-time }
+                  max_bytes: { type: integer, format: int64 }
+                  direct: { type: boolean }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/seller/products/{id}/assets:
+    post:
+      tags: [Seller]
+      summary: Finalise an upload
+      description: |
+        Records the asset and queues it for scanning. The size and the SHA-256
+        are read back from the stored object, never taken from the client — the
+        whole value of the checksum is that a buyer can verify their download
+        against it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [upload_id, filename, content_type]
+              properties:
+                upload_id: { type: string, format: uuid }
+                filename: { type: string, maxLength: 255 }
+                content_type: { type: string }
+                is_preview:
+                  type: boolean
+                  description: A preview is shown publicly and is not part of the delivery.
+      responses:
+        "201":
+          description: Asset recorded, scan queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  asset_id: { type: string }
+                  filename: { type: string }
+                  size_bytes: { type: integer, format: int64 }
+                  sha256: { type: string }
+                  scan_status: { type: string, enum: [pending] }
+                  note: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: The file has not arrived, is empty, or is too large.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/seller/products/{id}/readiness:
+    get:
+      tags: [Seller]
+      summary: Can this be published, and if not, why not
+      description: |
+        Every unmet condition at once, before the seller presses publish, rather
+        than one refusal at a time. The database trigger remains the authority;
+        this is a courtesy that stays in step with its four checks.
+
+        `you_can_fix_this` is false for blockers that are not the seller's to
+        resolve — verification and account status — because telling someone to
+        fix something they cannot is worse than telling them to wait.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Readiness
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready: { type: boolean }
+                  blockers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                          enum: [no_deliverable_asset, assets_not_clean, no_ai_disclosure, no_priced_variant, seller_not_verified]
+                        detail: { type: string }
+                        you_can_fix_this: { type: boolean }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/seller/products/{id}/publish:
+    post:
+      tags: [Seller]
+      summary: Take a listing live
+      description: |
+        Four conditions are enforced by a database trigger, not by this
+        endpoint: every deliverable asset scanned clean, an AI-content
+        declaration made, at least one active priced variant, and a seller who
+        is active with verified KYC. A control a direct UPDATE could bypass
+        would not be a control.
+
+        Publishing an already-published product is not an error.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: published }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: One or more publish conditions are unmet. The detail names them.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/seller/products/{id}/unpublish:
+    post:
+      tags: [Seller]
+      summary: Take a listing off sale
+      description: |
+        Buyers who already own it keep their downloads: a purchase is a
+        completed transaction, and withdrawing a listing is not a reason to take
+        back what somebody paid for.
+
+        Republishing does not reset ranking recency — `ranking_anchor_at` is set
+        once and frozen by a trigger — so an unpublish/republish cycle buys no
+        ranking advantage.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Returned to draft
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: draft }
+                  note: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ----------------------------------------------------------------- webhooks
   /webhooks/payments:
     post:
@@ -862,6 +1324,24 @@ components:
             collected. Travels with the order so a buyer or seller never has to
             ask how a figure was derived.
 
+    PayoutAccount:
+      type: object
+      description: A payout destination. The account number is never included.
+      properties:
+        id: { type: string, format: uuid }
+        method: { type: string, enum: [bank_account, vpa] }
+        last4: { type: string, maxLength: 4 }
+        ifsc: { type: string }
+        validation: { type: string, enum: [pending, in_progress, validated, failed] }
+        is_default: { type: boolean }
+        active_from:
+          type: string
+          format: date-time
+          description: When the 48-hour quarantine ends.
+        quarantined:
+          type: boolean
+          description: True while the destination still cannot receive money.
+
     Entitlement:
       type: object
       properties:
@@ -900,6 +1380,16 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     ValidationFailed:
       description: The request was well-formed but invalid.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: The caller lacks the role this endpoint requires.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: The request conflicts with the resource's current state.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }

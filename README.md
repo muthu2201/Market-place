@@ -108,6 +108,7 @@ internal/
   worker/     dispatcher + 13 scheduled tasks
 db/migrations/  12 migrations, embedded
 test/e2e/     end-to-end suite against the real payment adapter
+  testsupport/  gatewaysim (Razorpay wire protocol) · clamdsim (clamd INSTREAM)
 ops/          stress-test.sh
 docs/         adr · arch · api · security · runbooks · legal · operations
 ```

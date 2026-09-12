@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/muthu2201/market-place/internal/modules/audit"
+	"github.com/muthu2201/market-place/internal/modules/catalog"
 	"github.com/muthu2201/market-place/internal/modules/delivery"
 	"github.com/muthu2201/market-place/internal/modules/identity"
 	"github.com/muthu2201/market-place/internal/modules/ledger"
 	"github.com/muthu2201/market-place/internal/modules/orders"
 	"github.com/muthu2201/market-place/internal/modules/ranking"
+	"github.com/muthu2201/market-place/internal/modules/seller"
 	"github.com/muthu2201/market-place/internal/outbox"
 	"github.com/muthu2201/market-place/internal/platform/clock"
 	"github.com/muthu2201/market-place/internal/platform/config"
@@ -41,6 +43,8 @@ type Server struct {
 	delivery *delivery.Service
 	ledger   *ledger.Service
 	audit    *audit.Service
+	catalog  *catalog.Service
+	seller   *seller.Service
 
 	limiter   *ratelimit.Local
 	rules     limitRules
@@ -91,6 +95,8 @@ type Dependencies struct {
 	Delivery *delivery.Service
 	Ledger   *ledger.Service
 	Audit    *audit.Service
+	Catalog  *catalog.Service
+	Seller   *seller.Service
 }
 
 // New builds the server and its route table.
@@ -110,7 +116,7 @@ func New(d Dependencies) (*Server, error) {
 	s := &Server{
 		cfg: d.Config, db: d.DB, log: d.Log, m: d.Metrics, registry: d.Registry,
 		clk: d.Clock, identity: d.Identity, orders: d.Orders, delivery: d.Delivery,
-		ledger: d.Ledger, audit: d.Audit,
+		ledger: d.Ledger, audit: d.Audit, catalog: d.Catalog, seller: d.Seller,
 		limiter: ratelimit.NewLocal(d.Clock), startedAt: d.Clock.Now(),
 	}
 	s.rules = rulesFrom(d.Config.Limits)
@@ -173,6 +179,26 @@ func (s *Server) routes() http.Handler {
 	s.authed(mux, "GET /api/v1/library", s.handleLibrary)
 	s.authed(mux, "POST /api/v1/library/{license}/download/{asset}", s.handleIssueDownload)
 	s.route(mux, "GET /downloads/{grant}", s.handleRedeemDownload)
+
+	// --- seller ---------------------------------------------------------------
+	// Onboarding is open to any authenticated account; everything after it
+	// requires the seller role, which onboarding grants. Verification gates
+	// publishing and settlement separately — a pending seller can build a
+	// listing, they simply cannot sell it yet.
+	s.authed(mux, "POST /api/v1/seller/onboard", s.handleSellerOnboard)
+	s.staffed(mux, "POST /api/v1/seller/kyc/submit", s.handleSellerSubmitKYC, identity.RoleSeller)
+	s.staffed(mux, "GET /api/v1/seller/payouts", s.handleSellerPayoutStatus, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/payouts/accounts", s.handleSellerAddPayoutAccount, identity.RoleSeller)
+	s.staffed(mux, "DELETE /api/v1/seller/payouts/accounts/{id}", s.handleSellerDisablePayoutAccount, identity.RoleSeller)
+
+	s.staffed(mux, "POST /api/v1/seller/products", s.handleDraftProduct, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/products/{id}/variants", s.handleAddVariant, identity.RoleSeller)
+	s.staffed(mux, "PUT /api/v1/seller/products/{id}/tags", s.handleReplaceTags, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/products/{id}/uploads", s.handleRequestUpload, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/products/{id}/assets", s.handleFinaliseUpload, identity.RoleSeller)
+	s.staffed(mux, "GET /api/v1/seller/products/{id}/readiness", s.handleProductReadiness, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/products/{id}/publish", s.handlePublishProduct, identity.RoleSeller)
+	s.staffed(mux, "POST /api/v1/seller/products/{id}/unpublish", s.handleUnpublishProduct, identity.RoleSeller)
 
 	// --- provider webhooks --------------------------------------------------
 	// Deliberately outside CSRF and authentication: the signature IS the
