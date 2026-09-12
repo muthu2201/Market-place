@@ -61,7 +61,10 @@ refuses to start.
 | User enumeration via registration or reset | Same response whether or not the address exists; the mail differs, not the response | `identity/credentials.go` |
 | Session token theft | `__Host-` cookie, `Secure`, `HttpOnly`, `SameSite=Lax`; server-side revocation effective on the next request | `httpx/security.go`, `identity/service.go` |
 | Session fixation | A new session identifier is issued on every privilege change | `identity/service.go` |
-| Seller account takeover → payout redirect | TOTP mandatory for sellers, unconditionally in production; payout changes re-authenticate and are audited | `config`, `identity/service.go` |
+| Seller account takeover → payout redirect | TOTP mandatory for sellers, unconditionally in production; **every payout destination is quarantined 48 hours** and the seller is notified in the same transaction as the change; the previous destination keeps receiving settlement meanwhile | `config`, `identity/service.go`, `seller/payout.go` |
+| A payout destination that is valid but belongs to a stranger | Penny-drop name matching with a stated threshold; a failed match leaves the destination unusable | `seller/payout.go` |
+| Bank details exposed by a database read | Encrypted under the seller's subject key; the clear columns are the last four digits and the IFSC — enough to recognise, not enough to pay | `seller/payout.go` |
+| Enumerating account numbers through the fingerprint index | The fingerprint is HMAC under a deployment pepper, so the small account-number space cannot be tested against it | `seller/seller.go` |
 | Forged payment webhook | HMAC over the **exact raw body**, constant-time compare, per-provider secret | `payments/razorpay.go`, `payments/mor.go` |
 | Forged checkout callback | A **different** HMAC — `key_secret` over `order_id\|payment_id`. Never interchangeable with the webhook scheme | `payments/razorpay.go` |
 | Client IP spoofing via XFF | Right-to-left walk stopping at the first untrusted hop; production refuses an empty trusted-CIDR list | `httpx/middleware.go`, `config` |

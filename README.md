@@ -66,6 +66,8 @@ constraint in a visible migration.
 | A published product is deliverable | Trigger: no clean, scanned, non-preview asset, no publication |
 | An unscanned file cannot be served | Its object key names a location nothing has written to until it scans clean |
 | Relisting cannot bump a listing | `ranking_anchor_at` is set once and frozen by a trigger |
+| A payout destination cannot be redirected instantly | Every new or changed destination waits 48 hours, and the seller is told in the same transaction |
+| Settlement follows the provider's KYC, not ours | Eligibility reads `provider_account_status`; our own record is a cache, and a cache is not an authorisation |
 | An upload is what it claims to be | Magic-byte detection independent of any signature feed; executables refused outright |
 | An unscannable upload is not sellable | Scanner error and scanner-disabled are both unpublishable states, not "clean" |
 | A Content Credentials manifest means what it says | COSE signature verified, and the claim read only from the bytes that signature covers |
@@ -98,7 +100,7 @@ internal/
   platform/   money · ids · cryptox · db · httpx · config · mail · metrics
               ratelimit · problem · validate · logx · clock · migrate
   modules/    orders · payments · tax · ledger · identity · delivery
-              ranking · audit · provenance · catalog
+              ranking · audit · provenance · catalog · seller
   antivirus/  ClamAV INSTREAM client + magic-byte type detection
   outbox/     transactional outbox + dispatcher
   storage/    S3-protocol object storage, SigV4 implemented directly
@@ -130,7 +132,6 @@ Stated plainly rather than implied by an empty directory. The schema, the
 dependency matrix and the publish-time constraints for these already exist; what
 is missing is the Go and the surfaces:
 
-- Seller onboarding and payout-account surfaces
 - Moderation, disputes, grievance and DSAR workflows
 - The SSR web surface (`web/templates`, `web/static`)
 - Deployment manifests
