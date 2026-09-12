@@ -35,17 +35,18 @@ type Config struct {
 	Env     Env
 	Version string
 
-	HTTP     HTTPConfig
-	Database DatabaseConfig
-	Security SecurityConfig
-	Storage  StorageConfig
-	Payments PaymentsConfig
-	Tax      TaxConfig
-	Mail     MailConfig
-	Limits   LimitsConfig
-	Worker   WorkerConfig
-	Platform PlatformConfig
-	Observe  ObserveConfig
+	HTTP      HTTPConfig
+	Database  DatabaseConfig
+	Security  SecurityConfig
+	Storage   StorageConfig
+	Antivirus AntivirusConfig
+	Payments  PaymentsConfig
+	Tax       TaxConfig
+	Mail      MailConfig
+	Limits    LimitsConfig
+	Worker    WorkerConfig
+	Platform  PlatformConfig
+	Observe   ObserveConfig
 }
 
 type HTTPConfig struct {
@@ -98,6 +99,20 @@ type StorageConfig struct {
 	LocalRoot       string
 	PublicCDNBase   string
 	MultipartSize   int64
+}
+
+// AntivirusConfig configures upload scanning.
+//
+// The driver is "clamav" or "disabled". Production refuses "disabled", because
+// an unscanned asset is exactly the thing the publish trigger exists to stop
+// and a deployment that quietly turned scanning off would look identical to one
+// where every upload happened to be clean.
+type AntivirusConfig struct {
+	Driver    string
+	Address   string
+	Timeout   time.Duration
+	MaxBytes  int64
+	ChunkSize int
 }
 
 type PaymentsConfig struct {
@@ -266,6 +281,14 @@ func Load() (*Config, error) {
 		MultipartSize:   l.int64("STORAGE_MULTIPART_SIZE", 16<<20),
 	}
 
+	c.Antivirus = AntivirusConfig{
+		Driver:    getenv("ANTIVIRUS_DRIVER", "disabled"),
+		Address:   getenv("CLAMAV_ADDRESS", ""),
+		Timeout:   l.duration("CLAMAV_TIMEOUT", 5*time.Minute),
+		MaxBytes:  l.int64("CLAMAV_MAX_BYTES", 2<<30),
+		ChunkSize: int(l.int64("CLAMAV_CHUNK_SIZE", 64<<10)),
+	}
+
 	c.Payments = PaymentsConfig{
 		Provider:              getenv("PAYMENTS_PROVIDER", "bridge"),
 		RazorpayKeyID:         getenv("RAZORPAY_KEY_ID", ""),
@@ -362,6 +385,16 @@ func (l *loader) validateInvariants(c *Config) {
 	default:
 		l.errf("PAYMENTS_PROVIDER must be bridge|razorpay_route|mor, got %q", c.Payments.Provider)
 	}
+	switch c.Antivirus.Driver {
+	case "clamav":
+		if c.Antivirus.Address == "" {
+			l.errf("CLAMAV_ADDRESS is required when ANTIVIRUS_DRIVER=clamav (host:port, or unix:/path/to/clamd.ctl)")
+		}
+	case "disabled":
+	default:
+		l.errf("ANTIVIRUS_DRIVER must be clamav|disabled, got %q", c.Antivirus.Driver)
+	}
+
 	switch c.Storage.Driver {
 	case "s3", "filesystem":
 	default:
@@ -406,6 +439,9 @@ func (l *loader) validateInvariants(c *Config) {
 	}
 	if c.Security.HSTSMaxAge < 180*24*time.Hour {
 		l.errf("HSTS_MAX_AGE must be at least 180 days in production")
+	}
+	if c.Antivirus.Driver != "clamav" {
+		l.errf("ANTIVIRUS_DRIVER must be clamav in production: uploads that were never scanned must not be sellable")
 	}
 	if c.Storage.Driver != "s3" {
 		l.errf("STORAGE_DRIVER must be s3 in production; the filesystem driver is single-node only")

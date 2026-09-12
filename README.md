@@ -64,6 +64,8 @@ constraint in a visible migration.
 | No SQL built with `fmt.Sprintf` | `archcheck` rule 7 |
 | Module boundaries hold | A declared dependency matrix; an undeclared import fails the build |
 | A published product is deliverable | Trigger: no clean, scanned, non-preview asset, no publication |
+| An upload is what it claims to be | Magic-byte detection independent of any signature feed; executables refused outright |
+| An unscannable upload is not sellable | Scanner error and scanner-disabled are both unpublishable states, not "clean" |
 | A fee change gives 90 days' notice | `CHECK (effective_from >= announced_at + INTERVAL '90 days')` |
 | An unsafe production setting | 18 of them are **fatal at boot** |
 | The API matches its specification | `TestOpenAPIMatchesRoutes` compares the file to the router |
@@ -94,6 +96,7 @@ internal/
               ratelimit · problem · validate · logx · clock · migrate
   modules/    orders · payments · tax · ledger · identity · delivery
               ranking · audit
+  antivirus/  ClamAV INSTREAM client + magic-byte type detection
   outbox/     transactional outbox + dispatcher
   storage/    S3-protocol object storage, SigV4 implemented directly
   api/        HTTP surface and middleware chain
@@ -113,7 +116,7 @@ go run ./cmd/migrate up        # apply migrations
 ops/stress-test.sh             # full load test with invariant verification
 ```
 
-`APP_ENV=production` makes eighteen unsafe settings fatal at boot — a non-HTTPS
+`APP_ENV=production` makes nineteen unsafe settings fatal at boot — a non-HTTPS
 base URL, insecure cookies, `sslmode=disable`, a missing `PLATFORM_GSTIN`,
 `SETTLEMENT_HOLD_DAYS` under 7, disabled seller 2FA, and so on. The full list is
 in [docs/security/threat-model.md](docs/security/threat-model.md).
@@ -127,7 +130,6 @@ is missing is the Go and the surfaces:
 - Provenance signal extraction (C2PA verification, pHash/SimHash, metadata
   forensics) — until it lands, every listing routes to human review rather than
   auto-publishing, so the unfinished state fails toward more scrutiny, not less
-- Antivirus scanning client — the publish trigger already refuses unscanned assets
 - Catalogue write path, seller onboarding and payout-account surfaces
 - Moderation, disputes, grievance and DSAR workflows
 - The SSR web surface (`web/templates`, `web/static`)

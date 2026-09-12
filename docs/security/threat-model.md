@@ -130,14 +130,16 @@ refuses to start.
 | CSRF into a privileged action | `__Host-` signed double-submit bound to the session, plus `Sec-Fetch-Site`/`Origin`/`Referer` | `httpx/security.go` |
 | XSS → session theft | Nonce CSP with no `unsafe-inline`/`unsafe-eval`; `HttpOnly` cookies; contextual escaping | `httpx/security.go` |
 | CORS reflection | Static allow-list; the request `Origin` is never echoed | `httpx/security.go` |
-| Malicious upload executing | Magic-byte validation and AV scan before publication; the publish trigger refuses unscanned assets; assets served from a separate origin with `Content-Disposition: attachment` | `0005_catalog.sql`, `internal/antivirus` (pending) |
+| Malicious upload executing | ClamAV scan over the real INSTREAM protocol **plus** independent magic-byte detection; the publish trigger refuses any asset not scanned clean; assets served from a separate origin with `Content-Disposition: attachment` | `internal/antivirus`, `0005_catalog.sql` |
+| An executable dressed as a font, image or archive | Magic-byte detection compares content against the declared extension and refuses every executable format outright — this does not depend on a signature feed being current | `internal/antivirus/magic.go` |
+| A scanner outage read as "clean" | `StatusError` and `StatusSkipped` are both unpublishable; an unreachable scanner returns `ErrUnavailable`, never a verdict | `internal/antivirus` |
 | Privilege gained by switching provider at runtime | The adapter is chosen once at boot from validated configuration; there is no runtime switch, so a compromised admin session cannot redirect settlement | `payments/registry.go` |
 
 ---
 
 ## Configuration as a control
 
-Eighteen settings that are merely unwise in development are **fatal at boot** in
+Nineteen settings that are merely unwise in development are **fatal at boot** in
 production. This is a security control, not ergonomics: the most common way a
 secure system becomes insecure is a deployment that forgot a flag.
 
@@ -146,7 +148,8 @@ HSTS under 180 days; the filesystem storage driver; `MAIL_DRIVER=log`;
 `sslmode=disable`; a missing `PLATFORM_GSTIN` or `METRICS_TOKEN`; a Razorpay Route
 configuration missing any of its three secrets; a non-HTTPS provider base URL;
 `PAYMENTS_ALLOW_LOOPBACK_PROVIDER=true`; `SETTLEMENT_HOLD_DAYS < 7`;
-`RATE_LIMIT_LOGIN_BURST > 200`; `REQUIRE_2FA_SELLERS=false`; an empty
+`RATE_LIMIT_LOGIN_BURST > 200`; `REQUIRE_2FA_SELLERS=false`;
+`ANTIVIRUS_DRIVER` anything but `clamav`; an empty
 `HTTP_TRUSTED_PROXY_CIDRS`; a `DOWNLOAD_URL_TTL` that is too long; a key that is
 not exactly 32 bytes; or a commission outside 0–30%.
 
