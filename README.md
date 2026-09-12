@@ -68,6 +68,7 @@ constraint in a visible migration.
 | An unsafe production setting | 18 of them are **fatal at boot** |
 | The API matches its specification | `TestOpenAPIMatchesRoutes` compares the file to the router |
 | The documented worked example | `TestWorkedExampleMatchesDocs` computes it from the real code |
+| All of the above, on every push | [CI](.github/workflows/ci.yml) — including the race detector against a real database |
 
 ## Measured
 
@@ -130,7 +131,7 @@ is missing is the Go and the surfaces:
 - Catalogue write path, seller onboarding and payout-account surfaces
 - Moderation, disputes, grievance and DSAR workflows
 - The SSR web surface (`web/templates`, `web/static`)
-- CI workflow and deployment manifests
+- Deployment manifests
 
 The [compliance map](docs/legal/compliance-map.md) lists which regulatory
 obligations each of these discharges, and marks them pending there too.

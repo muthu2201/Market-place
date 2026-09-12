@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -111,6 +112,13 @@ func Open(t *testing.T) *db.DB {
 		shared = d
 	})
 	if initErr != nil {
+		// Skipping is right on a developer machine with no PostgreSQL, and
+		// dangerous in CI: a misconfigured pipeline would skip every
+		// integration test and report green while proving nothing. CI sets
+		// TEST_DATABASE_REQUIRED so the absence of a database is a failure.
+		if required, _ := strconv.ParseBool(os.Getenv("TEST_DATABASE_REQUIRED")); required {
+			t.Fatalf("TEST_DATABASE_REQUIRED is set but no test database is available: %v", initErr)
+		}
 		t.Skipf("integration test skipped: no test database available (%v)", initErr)
 	}
 	return shared
