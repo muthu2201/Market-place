@@ -162,9 +162,9 @@ database.
 
 ## Modules declared but not yet implemented
 
-The dependency matrix also declares `catalog`, `provenance`, `antivirus`,
-`payouts`, `compliance`, `notifications`, `search`, `disputes`, `admin`,
-`analytics`, `taxonomy` and `seller`. Their schema exists in migrations and
+The dependency matrix also declares `catalog`, `payouts`, `compliance`,
+`notifications`, `search`, `disputes`, `admin`, `analytics`, `taxonomy` and
+`seller`. Their schema exists in migrations and
 their allowed edges are already fixed, so when they are written the boundaries
 are decided before the first line of code — which is the point of declaring them
 now. Their absence is stated plainly in the repository README rather than

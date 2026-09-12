@@ -66,6 +66,7 @@ constraint in a visible migration.
 | A published product is deliverable | Trigger: no clean, scanned, non-preview asset, no publication |
 | An upload is what it claims to be | Magic-byte detection independent of any signature feed; executables refused outright |
 | An unscannable upload is not sellable | Scanner error and scanner-disabled are both unpublishable states, not "clean" |
+| A Content Credentials manifest means what it says | COSE signature verified, and the claim read only from the bytes that signature covers |
 | A fee change gives 90 days' notice | `CHECK (effective_from >= announced_at + INTERVAL '90 days')` |
 | An unsafe production setting | 18 of them are **fatal at boot** |
 | The API matches its specification | `TestOpenAPIMatchesRoutes` compares the file to the router |
@@ -95,7 +96,7 @@ internal/
   platform/   money · ids · cryptox · db · httpx · config · mail · metrics
               ratelimit · problem · validate · logx · clock · migrate
   modules/    orders · payments · tax · ledger · identity · delivery
-              ranking · audit
+              ranking · audit · provenance
   antivirus/  ClamAV INSTREAM client + magic-byte type detection
   outbox/     transactional outbox + dispatcher
   storage/    S3-protocol object storage, SigV4 implemented directly
@@ -127,9 +128,6 @@ Stated plainly rather than implied by an empty directory. The schema, the
 dependency matrix and the publish-time constraints for these already exist; what
 is missing is the Go and the surfaces:
 
-- Provenance signal extraction (C2PA verification, pHash/SimHash, metadata
-  forensics) — until it lands, every listing routes to human review rather than
-  auto-publishing, so the unfinished state fails toward more scrutiny, not less
 - Catalogue write path, seller onboarding and payout-account surfaces
 - Moderation, disputes, grievance and DSAR workflows
 - The SSR web surface (`web/templates`, `web/static`)

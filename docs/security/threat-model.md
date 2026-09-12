@@ -159,6 +159,7 @@ Stated plainly, because a threat model that claims none is not finished.
 
 | Risk | Why it is accepted | Mitigation |
 |---|---|---|
+| **A C2PA manifest may be signed by anyone** | Establishing that a signer is trustworthy needs the C2PA trust list, which is a policy input rather than a parsing question | Verification reports intactness and the signer separately, and says in words that the two are different questions |
 | **KEK compromise decrypts everything** | Concentration is the price of instant, backup-inclusive erasure | KMS/HSM custody, access audit, documented rotation that re-wraps DEKs |
 | **Presigned URLs are bearer tokens for their lifetime** | The alternative is proxying bytes, which reintroduces the egress cost the model depends on | Short TTL, quota spent at issue, every issue and denial audited |
 | **A single database is a single point of failure** | Consequence of ADR 0002, taken knowingly | Replication, PITR, documented failover |
@@ -178,6 +179,9 @@ Stated plainly, because a threat model that claims none is not finished.
 | Money conservation | 70,000 randomised property-test iterations |
 | Tax conservation | 200,000 randomised iterations |
 | SigV4 correctness | The official AWS reference vector, including the range-header case |
+| C2PA verification | Real signed manifests; tamper, signature substitution, claim substitution and hard-binding mismatch each detected |
+| CBOR parser under hostile input | Truncation, oversized length headers, deep nesting and unsupported forms — none panics, hangs or over-allocates |
+| Perceptual hashing | Re-compression, resize, brightness and watermark all stay under the duplicate threshold; unrelated works stay above it |
 | Race freedom | `-race` across the concurrency-critical packages |
 | Architecture rules | `archcheck` over 87 files, 12 justified exemptions |
 | Behaviour under load | Stress test; six real concurrency defects found and fixed |

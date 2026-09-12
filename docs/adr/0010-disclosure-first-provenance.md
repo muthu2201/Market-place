@@ -73,9 +73,26 @@ is what makes a takedown investigation tractable.
 
 ## Implementation status
 
-The schema, the publish-time triggers and the moderation queue are in place
-(migration `0005_catalog.sql`). The signal extractors — C2PA verification, pHash
-and SimHash computation, metadata forensics — are the remaining work, and until
-they land, `provenance_score` stays at its default and every listing routes
-through review rather than auto-publishing. The failure mode of the unfinished
-state is therefore more human review, not less safety.
+Implemented: the schema and publish-time triggers (`0005_catalog.sql`), and the
+signal extractors in `internal/modules/provenance` — C2PA manifest extraction
+with COSE_Sign1 verification, DCT perceptual hashing, SimHash over text and
+code, metadata generator hints, source-project detection, and the routing model.
+
+One boundary is drawn deliberately and stated wherever it surfaces. Three
+questions about a Content Credentials manifest get three separate answers:
+
+1. *Is it present?* Parsing alone.
+2. *Is it intact?* The COSE signature verifies against the certificate inside
+   the manifest, and the claim read out of it is the claim the signature
+   covers. This is checked.
+3. *Is the signer trustworthy?* **Not** checked here. That needs the C2PA trust
+   list, which is a policy input rather than a parsing question, so the signer
+   is recorded for a policy that owns the list to evaluate.
+
+Conflating the second and third would be the easiest way to turn this feature
+into a lie, and the reasons text says in words that a verified signature is not
+a trusted one.
+
+The moderation queue surfaces that consume this routing are the remaining work.
+Until they land the routing is computed and stored but acted on manually, which
+is more human review rather than less safety.
