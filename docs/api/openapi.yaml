@@ -1,0 +1,912 @@
+openapi: 3.1.0
+
+info:
+  title: Digital Products Marketplace API
+  version: "1.0.0"
+  summary: Buyer and seller API for an India-first digital-products marketplace.
+  description: |
+    Three conventions run through every endpoint.
+
+    **Money is always an object, never a bare number.** `{"minor": 118000,
+    "currency": "INR", "display": "1180.00"}`. A bare number loses its currency
+    somewhere between two services, and a float loses paise. The `minor` field
+    is the authoritative integer count of minor units; `display` is for humans
+    and must never be parsed back into an amount.
+
+    **Errors are RFC 9457 problem documents.** `application/problem+json`, with a
+    stable `type` URI per failure class so a client can branch without parsing
+    prose.
+
+    **Identifiers are prefixed.** `prd_`, `ord_`, `lic_`, `ast_`, `var_` followed
+    by 26 Crockford base32 characters. The prefix makes a misrouted identifier
+    obvious in a log; Crockford omits I, L, O and U so reading one aloud does
+    not create a support case.
+
+    This document covers the public surface. Operator endpoints — `/api/v1/admin/*`
+    behind a role, and `/internal/verify/*` behind an internal token — are
+    deliberately not published here: they exist, they are audited, and telling
+    the world where they are serves no caller. `TestOpenAPIMatchesRoutes`
+    compares this file against the router on every run, so a public endpoint
+    that is added without being documented, or documented without existing,
+    fails the build.
+  contact:
+    name: Security contact
+    url: /.well-known/security.txt
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.example.in
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Catalogue
+    description: Public browsing. No authentication.
+  - name: Authentication
+    description: Registration, login, password reset.
+  - name: Commerce
+    description: Checkout, payment, refunds. Session required.
+  - name: Delivery
+    description: Entitlements and download grants. Session required.
+  - name: Webhooks
+    description: Called by the payment provider. HMAC-authenticated.
+  - name: Transparency
+    description: Published ranking and fee disclosures. No authentication.
+  - name: Operations
+    description: Health, metrics and self-verification.
+
+security:
+  - sessionCookie: []
+
+paths:
+  # ---------------------------------------------------------------- operations
+  /healthz:
+    get:
+      tags: [Operations]
+      summary: Liveness
+      description: The process is running. Exempt from rate limiting.
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+
+  /readyz:
+    get:
+      tags: [Operations]
+      summary: Readiness
+      description: |
+        The process can serve traffic — principally, the database is reachable.
+        Wire this to the load balancer so an instance that loses its database is
+        removed rather than serving errors. Exempt from rate limiting.
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503":
+          description: Not ready
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Prometheus metrics
+      description: Requires `METRICS_TOKEN` as a bearer token in production.
+      security: [{ metricsToken: [] }]
+      responses:
+        "200":
+          description: Metrics in Prometheus text format
+          content:
+            text/plain: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /.well-known/security.txt:
+    get:
+      tags: [Operations]
+      summary: Security contact (RFC 9116)
+      security: []
+      responses:
+        "200":
+          description: Security policy
+          content:
+            text/plain: { schema: { type: string } }
+
+  # ------------------------------------------------------------- transparency
+  /legal/ranking:
+    get:
+      tags: [Transparency]
+      summary: How listings are ordered
+      description: |
+        The published ranking parameters and the reason for each, generated from
+        the same struct the scorer uses so the page and the code cannot drift.
+
+        Published because EU Regulation 2019/1150 Article 5, the DSA, and India's
+        Consumer Protection (E-Commerce) Rules 2020 each require it — and because
+        a formula a seller can recompute is worth more than a promise they cannot
+        verify.
+      security: []
+      responses:
+        "200":
+          description: The formula in force
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  formula_version: { type: string, example: v1 }
+                  parameters:
+                    type: object
+                    description: Every published constant.
+                  disclosure:
+                    type: array
+                    items: { type: string }
+                    description: Plain-language rationale, one entry per parameter.
+
+  /legal/fees:
+    get:
+      tags: [Transparency]
+      summary: The fee covenant
+      description: |
+        The commission in force, and the covenant: a seller is charged the
+        schedule that applied when they joined, and a new schedule requires 90
+        days' notice — a database constraint, not a promise.
+      security: []
+      responses:
+        "200":
+          description: Fee schedules and the covenant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current:
+                    type: object
+                    properties:
+                      code: { type: string, example: launch }
+                      commission_bps: { type: integer, example: 900 }
+                      description: { type: string }
+                  notice_period_days: { type: integer, const: 90 }
+
+  # --------------------------------------------------------------- catalogue
+  /api/v1/catalog/products:
+    get:
+      tags: [Catalogue]
+      summary: List products
+      security: []
+      parameters:
+        - { name: category, in: query, schema: { type: string } }
+        - { name: sort, in: query, schema: { type: string, enum: [ranked, newest, price_asc, price_desc] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 24 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: |
+            A page of products. `ranking_disclosure_url` and `ranking_note` are
+            on every listing response rather than buried on a policy page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [products, ranking_disclosure_url, ranking_note]
+                properties:
+                  products:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProductSummary" }
+                  sort: { type: string }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  ranking_disclosure_url: { type: string, const: /legal/ranking }
+                  ranking_note:
+                    type: string
+                    example: >-
+                      Order is produced by a published formula. There is no paid
+                      placement: no position on this marketplace can be bought.
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/catalog/products/{id}:
+    get:
+      tags: [Catalogue]
+      summary: Product detail
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^prd_[0-9A-HJKMNP-TV-Z]{26}$" } }
+      responses:
+        "200":
+          description: The product, its detail and its variants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product: { $ref: "#/components/schemas/ProductSummary" }
+                  detail: { type: object }
+                  variants:
+                    type: array
+                    items: { $ref: "#/components/schemas/Variant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/catalog/search:
+    get:
+      tags: [Catalogue]
+      summary: Search the catalogue
+      security: []
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 24 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: { type: string }
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProductSummary" }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  ranking_disclosure_url: { type: string }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  # ----------------------------------------------------------- authentication
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Create an account
+      description: |
+        The response is identical whether or not the address is already
+        registered. Only the e-mail sent differs, because a response that differs
+        is an account-enumeration oracle.
+
+        `accept_notice_version` records consent against a specific privacy-notice
+        version, which is what makes the consent record meaningful later.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, accept_notice_version]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                password:
+                  type: string
+                  minLength: 12
+                  description: |
+                    Checked against a breach list and against leet-speak and
+                    digit-stripped normalisations, so `p4ssw0rd1234` is refused.
+                display_name: { type: string, maxLength: 120 }
+                country: { type: string, minLength: 2, maxLength: 2, example: IN }
+                state_code: { type: integer, description: GST state code. }
+                accept_notice_version: { type: string }
+                notice_language: { type: string, example: en }
+      responses:
+        "201":
+          description: Accepted. Verification e-mail queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Sign in
+      description: |
+        A failure is identical for a missing account and a wrong password,
+        including in timing: the missing-account path runs a real Argon2id hash
+        so the two take the same time.
+
+        Sellers must supply `totp_code` or `recovery_code`; production
+        configuration refuses to disable that requirement, because a seller
+        controls a payout destination.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                totp_code: { type: string, pattern: "^[0-9]{6}$" }
+                recovery_code: { type: string }
+      responses:
+        "200":
+          description: |
+            Signed in. Sets a `__Host-`-prefixed session cookie and a CSRF cookie.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: "__Host-session and __Host-csrf; Secure; HttpOnly; SameSite=Lax"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Sign out
+      description: Revokes the session server-side; it stops working immediately.
+      responses:
+        "204": { description: Signed out }
+
+  /api/v1/auth/session:
+    get:
+      tags: [Authentication]
+      summary: Current session
+      description: |
+        Roles are resolved fresh from the database on every request, never read
+        from a client-held token, so a revocation takes effect immediately.
+      responses:
+        "200":
+          description: The session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/password-reset:
+    post:
+      tags: [Authentication]
+      summary: Begin a password reset
+      description: Always 202, whether or not the address exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { description: If the address exists, a reset e-mail was queued. }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/auth/password-reset/complete:
+    post:
+      tags: [Authentication]
+      summary: Complete a password reset
+      description: Single-use token. Completing it revokes every existing session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 12 }
+      responses:
+        "200": { description: Password changed; all sessions revoked. }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # ----------------------------------------------------------------- commerce
+  /api/v1/checkout:
+    post:
+      tags: [Commerce]
+      summary: Create an order
+      description: |
+        Prices and tax are computed **server-side**. The client sends product and
+        variant identifiers only — never an amount — so there is nothing to
+        tamper with.
+
+        Each line's `explanation` narrates how every figure was derived, in plain
+        language, and travels with the order so a buyer or seller never has to
+        ask.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema: { type: string, minLength: 8, maxLength: 255, pattern: "^[A-Za-z0-9._:-]+$" }
+          description: Retrying with the same key returns the same order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [product_id, variant_id]
+                    properties:
+                      product_id: { type: string, pattern: "^prd_[0-9A-HJKMNP-TV-Z]{26}$" }
+                      variant_id: { type: string, pattern: "^var_[0-9A-HJKMNP-TV-Z]{26}$" }
+                state_code: { type: integer, description: GST state code; defaults to the account's. }
+                country: { type: string, example: IN }
+                gstin: { type: string, description: Required when is_b2b is true. }
+                is_b2b: { type: boolean, default: false }
+      responses:
+        "201":
+          description: Order created, awaiting payment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/orders/{id}/payment:
+    post:
+      tags: [Commerce]
+      summary: Begin payment
+      description: |
+        Opens a payment at the provider, including the split instruction where
+        the provider supports it, and returns the parameters the client hands to
+        the provider's checkout. The buyer pays the provider directly — money
+        never passes through this platform.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^ord_[0-9A-HJKMNP-TV-Z]{26}$" } }
+      responses:
+        "200":
+          description: Provider handoff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id: { type: string }
+                  provider: { type: string, enum: [bridge, razorpay_route, mor] }
+                  intent_id: { type: string }
+                  amount: { $ref: "#/components/schemas/Money" }
+                  checkout: { type: object, description: Provider-specific checkout parameters. }
+                  expires_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The order is not in a payable state.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/orders/{id}/confirm:
+    post:
+      tags: [Commerce]
+      summary: Confirm a payment
+      description: |
+        Called when the buyer returns from the provider. The signature is
+        recomputed as `HMAC-SHA256(key_secret, order_id + "|" + payment_id)`; a
+        payment that does not verify is never honoured, whatever the client says.
+
+        This races the provider's webhook by design. Both call the same capture
+        routine and de-duplicate on the same idempotency key, so whichever
+        arrives first does the work and the other is a no-op.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intent_id, payment_id, signature]
+              properties:
+                intent_id: { type: string }
+                payment_id: { type: string }
+                signature: { type: string, description: Hex HMAC-SHA256. }
+      responses:
+        "200":
+          description: Paid. The entitlement exists and the ledger is posted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400":
+          description: Signature verification failed.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/orders:
+    get:
+      tags: [Commerce]
+      summary: List the caller's orders
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 24 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/orders/{id}:
+    get:
+      tags: [Commerce]
+      summary: Get one order
+      description: Ownership is part of the query, not a check after the fetch.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/orders/{id}/refund:
+    post:
+      tags: [Commerce]
+      summary: Request a refund
+      description: |
+        A refund is a new, compensating ledger entry — never a mutation. The
+        journal is append-only.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_id, reason]
+              properties:
+                item_id: { type: string }
+                amount_minor:
+                  type: integer
+                  format: int64
+                  nullable: true
+                  description: Omit for a full refund of the line.
+                reason: { type: string }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        "202":
+          description: Refund requested
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "409":
+          description: Not refundable in the order's current state.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  # ----------------------------------------------------------------- delivery
+  /api/v1/library:
+    get:
+      tags: [Delivery]
+      summary: The caller's entitlements
+      responses:
+        "200":
+          description: Licences and their assets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  library:
+                    type: array
+                    items: { $ref: "#/components/schemas/Entitlement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/library/{license}/download/{asset}:
+    post:
+      tags: [Delivery]
+      summary: Issue a download grant
+      description: |
+        One query establishes ownership, licence validity, remaining quota and
+        asset membership together.
+
+        **Quota is spent at issue, not at redemption.** A grant that is issued
+        and never used still counts — otherwise a client could harvest unlimited
+        grants and redeem them later.
+
+        Every issue and every denial is recorded in the audit log; denials are
+        written after the transaction that refused them rolls back, so evidence
+        of an attempted abuse is not lost with the rollback that caught it.
+      parameters:
+        - { name: license, in: path, required: true, schema: { type: string } }
+        - { name: asset, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: A short-lived, single-use URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string, format: uri }
+                  direct: { type: boolean, description: True when the URL points straight at object storage. }
+                  expires_at: { type: string, format: date-time }
+                  filename: { type: string }
+                  size_bytes: { type: integer, format: int64 }
+                  note: { type: string }
+        "403":
+          description: No entitlement, licence expired or revoked, or quota exhausted.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /downloads/{grant}:
+    get:
+      tags: [Delivery]
+      summary: Redeem a grant
+      description: Redirects to object storage. Bytes never pass through this API.
+      security: []
+      parameters:
+        - { name: grant, in: path, required: true, schema: { type: string } }
+        - { name: t, in: query, required: true, schema: { type: string }, description: Grant token. }
+      responses:
+        "302": { description: Redirect to the presigned object URL }
+        "403":
+          description: Expired, already redeemed, or invalid.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  # ----------------------------------------------------------------- webhooks
+  /webhooks/payments:
+    post:
+      tags: [Webhooks]
+      summary: Payment provider events
+      description: |
+        Authenticated by `HMAC-SHA256(webhook_secret, exact raw request body)` —
+        a **different secret and a different payload** from the checkout
+        callback. The body is read once into a buffer so the verified bytes and
+        the parsed bytes are provably the same bytes; re-serialising JSON would
+        change them.
+
+        De-duplicated on `(provider, event_id)`, so a provider that sends the
+        same event five times processes it once.
+      security: [{ webhookSignature: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: |
+            Accepted. `duplicate` true means the event was already processed —
+            which is a success, not an error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: accepted }
+                  event_id: { type: string }
+                  duplicate: { type: boolean }
+                  processed: { type: boolean }
+        "400":
+          description: Signature verification failed. Never processed.
+        "500":
+          description: |
+            Transient failure. The body is `{"status":"retry"}` so the provider
+            retries rather than marking the event delivered.
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-session
+      description: |
+        Set at login. State-changing requests additionally require the
+        `__Host-csrf` cookie echoed in the `X-CSRF-Token` header — a signed
+        double-submit bound to the session, checked alongside `Sec-Fetch-Site`,
+        `Origin` and `Referer`.
+    metricsToken:
+      type: http
+      scheme: bearer
+      description: "`METRICS_TOKEN`. Required in production."
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: X-Razorpay-Signature
+      description: HMAC-SHA256 of the raw body under the provider webhook secret.
+
+  schemas:
+    Money:
+      type: object
+      description: |
+        Always an object. `minor` is the authoritative integer count of minor
+        units — paise for INR. `display` is for humans and must never be parsed
+        back into an amount.
+      required: [minor, currency, display]
+      properties:
+        minor: { type: integer, format: int64, example: 118000 }
+        currency: { type: string, minLength: 3, maxLength: 3, example: INR }
+        display: { type: string, example: "1180.00" }
+
+    Problem:
+      type: object
+      description: RFC 9457. `type` is stable per failure class.
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail:
+          type: string
+          description: Never leaks internals. Identical across cases a caller must not distinguish.
+        instance: { type: string }
+        request_id: { type: string, description: Quote this when reporting a problem. }
+        retry_after_seconds: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, code, detail]
+            properties:
+              field: { type: string }
+              code: { type: string }
+              detail: { type: string }
+
+    ProductSummary:
+      type: object
+      properties:
+        id: { type: string, pattern: "^prd_[0-9A-HJKMNP-TV-Z]{26}$" }
+        title: { type: string }
+        summary: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        seller_id: { type: string }
+        ai_disclosure:
+          type: string
+          enum: [no_ai, ai_assisted, ai_generated, ai_generated_edited]
+          description: |
+            Mandatory and declared by the seller. A product cannot publish while
+            undeclared — a database trigger refuses it. Provenance signals
+            corroborate this declaration; they never replace it.
+        category: { type: string }
+        tags: { type: array, items: { type: string } }
+
+    Variant:
+      type: object
+      properties:
+        id: { type: string, pattern: "^var_[0-9A-HJKMNP-TV-Z]{26}$" }
+        name: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        license_type: { type: string }
+
+    Session:
+      type: object
+      properties:
+        authenticated: { type: boolean }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            display_name: { type: string }
+            country: { type: string }
+            state_code: { type: integer }
+            roles:
+              type: array
+              items: { type: string }
+              description: Resolved fresh from the database on every request.
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, pattern: "^ord_[0-9A-HJKMNP-TV-Z]{26}$" }
+        number: { type: string }
+        status:
+          type: string
+          enum: [pending, paid, complete, refunded, partially_refunded, cancelled, expired]
+        currency: { type: string }
+        subtotal: { $ref: "#/components/schemas/Money" }
+        tax_total: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+        refunded: { $ref: "#/components/schemas/Money" }
+        place_of_supply:
+          type: object
+          properties:
+            country: { type: string }
+            state_code: { type: integer }
+        created_at: { type: string, format: date-time }
+        paid_at: { type: string, format: date-time, nullable: true }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderLine" }
+
+    OrderLine:
+      type: object
+      properties:
+        item_id: { type: string }
+        title: { type: string }
+        seller_id: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        tax: { $ref: "#/components/schemas/Money" }
+        total: { $ref: "#/components/schemas/Money" }
+        tax_breakdown:
+          type: object
+          properties:
+            cgst: { $ref: "#/components/schemas/Money" }
+            sgst: { $ref: "#/components/schemas/Money" }
+            igst: { $ref: "#/components/schemas/Money" }
+            rate_bps: { type: integer }
+            supply_type:
+              type: string
+              enum: [intra_state, inter_state, export_of_services, exempt_unregistered_supplier]
+        explanation:
+          type: array
+          items: { type: string }
+          description: |
+            Plain-language narration of every step of the computation — place of
+            supply, GST split, commission basis, why TCS or TDS was or was not
+            collected. Travels with the order so a buyer or seller never has to
+            ask how a figure was derived.
+
+    Entitlement:
+      type: object
+      properties:
+        license_id: { type: string, pattern: "^lic_[0-9A-HJKMNP-TV-Z]{26}$" }
+        product: { type: string }
+        license_type: { type: string }
+        terms: { type: string }
+        downloads_used: { type: integer }
+        download_limit: { type: integer }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked: { type: boolean }
+        assets:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, pattern: "^ast_[0-9A-HJKMNP-TV-Z]{26}$" }
+              filename: { type: string }
+              size_bytes: { type: integer, format: int64 }
+              content_type: { type: string }
+              sha256: { type: string, description: Verify the download against this. }
+
+  responses:
+    Unauthorized:
+      description: No valid session.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: |
+        Not found — or found but not the caller's. The two are deliberately
+        indistinguishable, so this endpoint cannot be used to probe for the
+        existence of other people's records.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    ValidationFailed:
+      description: The request was well-formed but invalid.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    RateLimited:
+      description: Too many requests. `retry_after_seconds` says when to retry.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

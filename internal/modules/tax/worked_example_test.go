@@ -44,7 +44,7 @@ func TestWorkedExampleMatchesDocs(t *testing.T) {
 		pspFee, pspFeeGST, sellerNet, platformNet string
 	}{{
 		// docs/arch/04-money-flow.md — the primary worked example.
-		name: "inter-state supply, platform bears the processing cost",
+		name:  "inter-state supply, platform bears the processing cost",
 		buyer: tax.Buyer{Country: "IN", StateCode: 29}, bears: "platform",
 		supply: tax.InterState,
 		cgst:   "0.00", sgst: "0.00", igst: "180.00", buyerTotal: "1180.00",
@@ -53,7 +53,7 @@ func TestWorkedExampleMatchesDocs(t *testing.T) {
 		pspFee: "23.60", pspFeeGST: "4.25", sellerNet: "1062.80", platformNet: "66.40",
 	}, {
 		// docs/adr/0015-flat-all-in-commission.md — the seller-facing example.
-		name: "intra-state supply, seller bears the processing cost",
+		name:  "intra-state supply, seller bears the processing cost",
 		buyer: tax.Buyer{Country: "IN", StateCode: 33}, bears: "seller",
 		supply: tax.IntraState,
 		cgst:   "90.00", sgst: "90.00", igst: "0.00", buyerTotal: "1180.00",

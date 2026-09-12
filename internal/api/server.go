@@ -46,6 +46,19 @@ type Server struct {
 	rules     limitRules
 	startedAt time.Time
 	handler   http.Handler
+
+	// registered records every route pattern as it is added, so the public API
+	// surface can be compared against docs/api/openapi.yaml by a test. A
+	// specification that drifts from the router is worse than none.
+	registered []string
+}
+
+// RegisteredRoutes returns every route pattern the server serves, in
+// registration order, as "METHOD /path".
+func (s *Server) RegisteredRoutes() []string {
+	out := make([]string, len(s.registered))
+	copy(out, s.registered)
+	return out
 }
 
 // limitRules holds the configured limits, so a handler reads one place rather
@@ -206,6 +219,7 @@ func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 	if i := strings.IndexByte(pattern, ' '); i > 0 {
 		template = pattern[i+1:]
 	}
+	s.registered = append(s.registered, pattern)
 	mux.Handle(pattern, httpx.WithRoute(template, h))
 }
 
@@ -215,6 +229,7 @@ func (s *Server) authed(mux *http.ServeMux, pattern string, h http.HandlerFunc) 
 	if i := strings.IndexByte(pattern, ' '); i > 0 {
 		template = pattern[i+1:]
 	}
+	s.registered = append(s.registered, pattern)
 	mux.Handle(pattern, httpx.WithRoute(template, s.requireAuth(h)))
 }
 
@@ -224,6 +239,7 @@ func (s *Server) staffed(mux *http.ServeMux, pattern string, h http.HandlerFunc,
 	if i := strings.IndexByte(pattern, ' '); i > 0 {
 		template = pattern[i+1:]
 	}
+	s.registered = append(s.registered, pattern)
 	mux.Handle(pattern, httpx.WithRoute(template, s.requireRole(roles...)(h)))
 }
 
